@@ -93,7 +93,7 @@
       <ProjectReference Include="..\ErsatzTV.Application\ErsatzTV.Application.csproj" />
       <ProjectReference Include="..\ErsatzTV.Core\ErsatzTV.Core.csproj" />
       <ProjectReference Include="..\ErsatzTV.Infrastructure\ErsatzTV.Infrastructure.csproj" />
-      <ProjectReference Include="..\ErsatzTV.Scanner\ErsatzTV.Scanner.csproj" />
+      <!--<ProjectReference Include="..\ErsatzTV.Scanner\ErsatzTV.Scanner.csproj" />-->
     </ItemGroup>
 
     <ItemGroup>
