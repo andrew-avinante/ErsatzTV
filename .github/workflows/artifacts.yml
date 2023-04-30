@@ -26,19 +26,6 @@ on:
       gh_token:
         required: true
 jobs:
-  build_and_upload_mac:
-    name: Mac Build & Upload
-    runs-on: ${{ matrix.os }}
-    if: contains(github.event.head_commit.message, '[no build]') == false
-    strategy:
-      matrix:
-        include:
-          - os: macos-11
-            kind: macOS
-            target: osx-x64
-          - os: macos-11
-            kind: macOS
-            target: osx-arm64
     steps:
       - name: Get the sources
         uses: actions/checkout@v3
@@ -167,9 +154,6 @@ jobs:
           - os: ubuntu-latest
             kind: linux
             target: linux-arm64
-          - os: windows-latest
-            kind: windows
-            target: win-x64
     steps:
       - name: Get the sources
         uses: actions/checkout@v3
