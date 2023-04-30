@@ -201,19 +201,6 @@ jobs:
           dotnet publish ErsatzTV.Scanner/ErsatzTV.Scanner.csproj --framework net7.0 --runtime "${{ matrix.target }}" -c Release -o "$release_name" -p:InformationalVersion="${{ inputs.release_version }}-${{ matrix.target }}" -p:EnableCompressionInSingleFile=true -p:DebugType=Embedded -p:PublishSingleFile=true --self-contained true
           dotnet publish ErsatzTV/ErsatzTV.csproj --framework net7.0 --runtime "${{ matrix.target }}" -c Release -o "$release_name" -p:InformationalVersion="${{ inputs.release_version }}-${{ matrix.target }}" -p:EnableCompressionInSingleFile=true -p:DebugType=Embedded -p:PublishSingleFile=true --self-contained true
 
-          # Build Windows launcher
-          if [ "${{ matrix.kind }}" == "windows" ]; then
-            cargo build --manifest-path=ErsatzTV-Windows/Cargo.toml --release --all-features
-            ls -l ErsatzTV-Windows/target/release
-            mv ErsatzTV-Windows/target/release/ersatztv_windows.exe "$release_name/ErsatzTV-Windows.exe"
-          fi
-
-          # Download ffmpeg
-          if [ "${{ matrix.kind }}" == "windows" ]; then
-            7z e "ffmpeg/${{ steps.downloadffmpeg.outputs.filename }}" -o"$release_name" '*.exe' -r
-            rm -f "$release_name/ffplay.exe"
-          fi
-
           # Pack files
           if [ "${{ matrix.kind }}" == "windows" ]; then
             7z a -tzip "${release_name}.zip" "./${release_name}/*"
