@@ -1,4 +1,5 @@
 ﻿using CliWrap;
+using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Domain.Filler;
@@ -97,6 +98,12 @@ public class GetPlayoutItemProcessByChannelNumberHandler : FFmpegProcessHandler<
             .ThenInclude(mi => (mi as MusicVideo).MusicVideoMetadata)
             .ThenInclude(mvm => mvm.Artists)
             .Include(i => i.MediaItem)
+            .ThenInclude(mi => (mi as MusicVideo).MusicVideoMetadata)
+            .ThenInclude(mvm => mvm.Studios)
+            .Include(i => i.MediaItem)
+            .ThenInclude(mi => (mi as MusicVideo).MusicVideoMetadata)
+            .ThenInclude(mvm => mvm.Directors)
+            .Include(i => i.MediaItem)
             .ThenInclude(mi => (mi as MusicVideo).MediaVersions)
             .ThenInclude(mv => mv.MediaFiles)
             .Include(i => i.MediaItem)
@@ -126,7 +133,7 @@ public class GetPlayoutItemProcessByChannelNumberHandler : FFmpegProcessHandler<
             .Include(i => i.Watermark)
             .ForChannelAndTime(channel.Id, now)
             .Map(o => o.ToEither<BaseError>(new UnableToLocatePlayoutItem()))
-            .BindT(ValidatePlayoutItemPath);
+            .BindT(item => ValidatePlayoutItemPath(dbContext, item));
 
         if (maybePlayoutItem.LeftAsEnumerable().Any(e => e is UnableToLocatePlayoutItem))
         {
@@ -295,30 +302,8 @@ public class GetPlayoutItemProcessByChannelNumberHandler : FFmpegProcessHandler<
 
         if (isMediaServer)
         {
-            string mediaItemFolder = Path.GetDirectoryName(playoutItemWithPath.Path);
-
-            allSubtitles = allSubtitles.Map<Subtitle, Option<Subtitle>>(
-                    subtitle =>
-                    {
-                        if (subtitle.SubtitleKind == SubtitleKind.Sidecar)
-                        {
-                            // need to prepend path with movie/episode folder
-                            if (!string.IsNullOrWhiteSpace(mediaItemFolder))
-                            {
-                                subtitle.Path = Path.Combine(mediaItemFolder, subtitle.Path);
-
-                                // skip subtitles that don't exist
-                                if (!File.Exists(subtitle.Path))
-                                {
-                                    return None;
-                                }
-                            }
-                        }
-
-                        return subtitle;
-                    })
-                .Somes()
-                .ToList();
+            // closed captions are currently unsupported
+            allSubtitles.RemoveAll(s => s.Codec == "eia_608");
         }
 
         return allSubtitles;
@@ -440,19 +425,75 @@ public class GetPlayoutItemProcessByChannelNumberHandler : FFmpegProcessHandler<
                 DisableWatermarks = !fallbackPreset.AllowWatermarks
             };
 
-            return await ValidatePlayoutItemPath(playoutItem);
+            return await ValidatePlayoutItemPath(dbContext, playoutItem);
         }
 
         return new UnableToLocatePlayoutItem();
     }
 
-    private async Task<Either<BaseError, PlayoutItemWithPath>> ValidatePlayoutItemPath(PlayoutItem playoutItem)
+    private async Task<Either<BaseError, PlayoutItemWithPath>> ValidatePlayoutItemPath(
+        TvContext dbContext,
+        PlayoutItem playoutItem)
     {
         string path = await GetPlayoutItemPath(playoutItem);
 
+        // check filesystem first
         if (_localFileSystem.FileExists(path))
         {
             return new PlayoutItemWithPath(playoutItem, path);
+        }
+
+        // attempt to remotely stream plex
+        MediaFile file = playoutItem.MediaItem.GetHeadVersion().MediaFiles.Head();
+        switch (file)
+        {
+            case PlexMediaFile pmf:
+                Option<int> maybeId = await dbContext.Connection.QuerySingleOrDefaultAsync<int>(
+                        @"SELECT PMS.Id FROM PlexMediaSource PMS
+                  INNER JOIN Library L on PMS.Id = L.MediaSourceId
+                  INNER JOIN LibraryPath LP on L.Id = LP.LibraryId
+                  WHERE LP.Id = @LibraryPathId",
+                        new { playoutItem.MediaItem.LibraryPathId })
+                    .Map(Optional);
+
+                foreach (int plexMediaSourceId in maybeId)
+                {
+                    return new PlayoutItemWithPath(
+                        playoutItem,
+                        $"http://localhost:{Settings.ListenPort}/media/plex/{plexMediaSourceId}/{pmf.Key}");
+                }
+
+                break;
+        }
+        
+        // attempt to remotely stream jellyfin
+        Option<string> jellyfinItemId = playoutItem.MediaItem switch
+        {
+            JellyfinEpisode e => e.ItemId,
+            JellyfinMovie m => m.ItemId,
+            _ => None
+        };
+
+        foreach (string itemId in jellyfinItemId)
+        {
+            return new PlayoutItemWithPath(
+                playoutItem,
+                $"http://localhost:{Settings.ListenPort}/media/jellyfin/{itemId}");
+        }
+        
+        // attempt to remotely stream emby
+        Option<string> embyItemId = playoutItem.MediaItem switch
+        {
+            EmbyEpisode e => e.ItemId,
+            EmbyMovie m => m.ItemId,
+            _ => None
+        };
+
+        foreach (string itemId in embyItemId)
+        {
+            return new PlayoutItemWithPath(
+                playoutItem,
+                $"http://localhost:{Settings.ListenPort}/media/emby/{itemId}");
         }
 
         return new PlayoutItemDoesNotExistOnDisk(path);
@@ -461,8 +502,8 @@ public class GetPlayoutItemProcessByChannelNumberHandler : FFmpegProcessHandler<
     private async Task<string> GetPlayoutItemPath(PlayoutItem playoutItem)
     {
         MediaVersion version = playoutItem.MediaItem.GetHeadVersion();
-
         MediaFile file = version.MediaFiles.Head();
+
         string path = file.Path;
         return playoutItem.MediaItem switch
         {

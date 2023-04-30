@@ -33,10 +33,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-11
             kind: macOS
             target: osx-x64
-          - os: macos-latest
+          - os: macos-11
             kind: macOS
             target: osx-arm64
     steps:
@@ -203,12 +203,12 @@ jobs:
       - name: Install dependencies
         run: dotnet restore -r "${{ matrix.target }}"
 
-      - uses: suisei-cn/actions-download-file@v1
+      - uses: suisei-cn/actions-download-file@v1.3.0
         if: ${{ matrix.kind == 'windows' }}
         id: downloadffmpeg
         name: Download ffmpeg
         with:
-          url: "https://github.com/GyanD/codexffmpeg/releases/download/5.1/ffmpeg-5.1-full_build.7z"
+          url: "https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z"
           target: ffmpeg/
 
       - name: Build

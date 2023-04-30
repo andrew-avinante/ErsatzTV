@@ -3,11 +3,11 @@ using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Domain.MediaServer;
 using ErsatzTV.Core.Errors;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.MediaSources;
 using ErsatzTV.Core.Metadata;
-using ErsatzTV.Scanner.Core.Interfaces.Metadata;
 using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Scanner.Core.Metadata;
@@ -19,32 +19,30 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
     where TEtag : MediaServerItemEtag
 {
     private readonly ILocalFileSystem _localFileSystem;
-    private readonly ILocalStatisticsProvider _localStatisticsProvider;
-    private readonly ILocalSubtitlesProvider _localSubtitlesProvider;
+    private readonly IMetadataRepository _metadataRepository;
     private readonly ILogger _logger;
     private readonly IMediator _mediator;
 
     protected MediaServerMovieLibraryScanner(
-        ILocalStatisticsProvider localStatisticsProvider,
-        ILocalSubtitlesProvider localSubtitlesProvider,
         ILocalFileSystem localFileSystem,
+        IMetadataRepository metadataRepository,
         IMediator mediator,
         ILogger logger)
     {
-        _localStatisticsProvider = localStatisticsProvider;
-        _localSubtitlesProvider = localSubtitlesProvider;
         _localFileSystem = localFileSystem;
+        _metadataRepository = metadataRepository;
         _mediator = mediator;
         _logger = logger;
     }
+    
+    protected virtual bool ServerSupportsRemoteStreaming => false;
+    protected virtual bool ServerReturnsStatisticsWithMetadata => false;
 
     protected async Task<Either<BaseError, Unit>> ScanLibrary(
         IMediaServerMovieRepository<TLibrary, TMovie, TEtag> movieRepository,
         TConnectionParameters connectionParameters,
         TLibrary library,
         Func<TMovie, string> getLocalPath,
-        string ffmpegPath,
-        string ffprobePath,
         bool deepScan,
         CancellationToken cancellationToken)
     {
@@ -63,8 +61,6 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
                     connectionParameters,
                     library,
                     getLocalPath,
-                    ffmpegPath,
-                    ffprobePath,
                     GetMovieLibraryItems(connectionParameters, library),
                     count,
                     deepScan,
@@ -85,8 +81,6 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
         TConnectionParameters connectionParameters,
         TLibrary library,
         Func<TMovie, string> getLocalPath,
-        string ffmpegPath,
-        string ffprobePath,
         IAsyncEnumerable<TMovie> movieEntries,
         int totalMovieCount,
         bool deepScan,
@@ -121,18 +115,49 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
             {
                 continue;
             }
+            
+            Either<BaseError, MediaItemScanResult<TMovie>> maybeMovie;
 
-            Either<BaseError, MediaItemScanResult<TMovie>> maybeMovie = await movieRepository
-                .GetOrAdd(library, incoming)
-                .MapT(
-                    result =>
-                    {
-                        result.LocalPath = localPath;
-                        return result;
-                    })
-                .BindT(existing => UpdateMetadata(connectionParameters, library, existing, incoming, deepScan))
-                .BindT(existing => UpdateStatistics(existing, incoming, ffmpegPath, ffprobePath))
-                .BindT(UpdateSubtitles);
+            if (ServerReturnsStatisticsWithMetadata)
+            {
+                maybeMovie = await movieRepository
+                    .GetOrAdd(library, incoming, deepScan)
+                    .MapT(
+                        result =>
+                        {
+                            result.LocalPath = localPath;
+                            return result;
+                        })
+                    .BindT(
+                        existing => UpdateMetadataAndStatistics(
+                            connectionParameters,
+                            library,
+                            existing,
+                            incoming,
+                            deepScan));
+            }
+            else
+            {
+                maybeMovie = await movieRepository
+                    .GetOrAdd(library, incoming, deepScan)
+                    .MapT(
+                        result =>
+                        {
+                            result.LocalPath = localPath;
+                            return result;
+                        })
+                    .BindT(
+                        existing => UpdateMetadata(connectionParameters, library, existing, incoming, deepScan, None))
+                    .BindT(
+                        existing => UpdateStatistics(
+                            connectionParameters,
+                            library,
+                            existing,
+                            incoming,
+                            deepScan,
+                            None))
+                    .BindT(UpdateSubtitles);
+            }
 
             if (maybeMovie.IsLeft)
             {
@@ -154,6 +179,14 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
                 if (_localFileSystem.FileExists(result.LocalPath))
                 {
                     if (await movieRepository.FlagNormal(library, result.Item))
+                    {
+                        result.IsUpdated = true;
+                    }
+                }
+                else if (ServerSupportsRemoteStreaming)
+                {
+                    Option<int> flagResult = await movieRepository.FlagRemoteOnly(library, result.Item);
+                    if (flagResult.IsSome)
                     {
                         result.IsUpdated = true;
                     }
@@ -218,6 +251,18 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
         TMovie incoming,
         bool deepScan);
 
+    protected virtual Task<Option<MediaVersion>> GetMediaServerStatistics(
+        TConnectionParameters connectionParameters,
+        TLibrary library,
+        MediaItemScanResult<TMovie> result,
+        TMovie incoming) => Task.FromResult(Option<MediaVersion>.None);
+    
+    protected abstract Task<Option<Tuple<MovieMetadata, MediaVersion>>> GetFullMetadataAndStatistics(
+        TConnectionParameters connectionParameters,
+        TLibrary library,
+        MediaItemScanResult<TMovie> result,
+        TMovie incoming);
+
     protected abstract Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateMetadata(
         MediaItemScanResult<TMovie> result,
         MovieMetadata fullMetadata);
@@ -248,7 +293,7 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
             existingEtag == MediaServerEtag(incoming))
         {
             // skip scanning unavailable/file not found items that are unchanged and still don't exist locally
-            if (!_localFileSystem.FileExists(localPath))
+            if (!_localFileSystem.FileExists(localPath) && !ServerSupportsRemoteStreaming)
             {
                 return false;
             }
@@ -259,11 +304,23 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
             // don't scan, but mark as unavailable
             if (!_localFileSystem.FileExists(localPath))
             {
-                foreach (int id in await movieRepository.FlagUnavailable(library, incoming))
+                if (ServerSupportsRemoteStreaming)
                 {
-                    await _mediator.Publish(
-                        new ScannerProgressUpdate(library.Id, null, null, new[] { id }, Array.Empty<int>()),
-                        CancellationToken.None);
+                    foreach (int id in await movieRepository.FlagRemoteOnly(library, incoming))
+                    {
+                        await _mediator.Publish(
+                            new ScannerProgressUpdate(library.Id, null, null, new[] { id }, Array.Empty<int>()),
+                            CancellationToken.None);
+                    }
+                }
+                else
+                {
+                    foreach (int id in await movieRepository.FlagUnavailable(library, incoming))
+                    {
+                        await _mediator.Publish(
+                            new ScannerProgressUpdate(library.Id, null, null, new[] { id }, Array.Empty<int>()),
+                            CancellationToken.None);
+                    }
                 }
             }
 
@@ -282,19 +339,75 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
         return true;
     }
 
-    private async Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateMetadata(
+    private async Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateMetadataAndStatistics(
         TConnectionParameters connectionParameters,
         TLibrary library,
         MediaItemScanResult<TMovie> result,
         TMovie incoming,
         bool deepScan)
     {
-        foreach (MovieMetadata fullMetadata in await GetFullMetadata(
-                     connectionParameters,
-                     library,
-                     result,
-                     incoming,
-                     deepScan))
+        Option<Tuple<MovieMetadata, MediaVersion>> maybeMetadataAndStatistics = await GetFullMetadataAndStatistics(
+            connectionParameters,
+            library,
+            result,
+            incoming);
+
+        foreach ((MovieMetadata fullMetadata, MediaVersion mediaVersion) in maybeMetadataAndStatistics)
+        {
+            Either<BaseError, MediaItemScanResult<TMovie>> metadataResult = await UpdateMetadata(
+                connectionParameters,
+                library,
+                result,
+                incoming,
+                deepScan,
+                fullMetadata);
+
+            foreach (BaseError error in metadataResult.LeftToSeq())
+            {
+                return error;
+            }
+
+            foreach (MediaItemScanResult<TMovie> r in metadataResult.RightToSeq())
+            {
+                result = r;
+            }
+
+            Either<BaseError, MediaItemScanResult<TMovie>> statisticsResult = await UpdateStatistics(
+                connectionParameters,
+                library,
+                result,
+                incoming,
+                deepScan,
+                mediaVersion);
+            
+            foreach (BaseError error in statisticsResult.LeftToSeq())
+            {
+                return error;
+            }
+            
+            foreach (MediaItemScanResult<TMovie> r in metadataResult.RightToSeq())
+            {
+                result = r;
+            }
+        }
+
+        return result;
+    }
+    
+    private async Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateMetadata(
+        TConnectionParameters connectionParameters,
+        TLibrary library,
+        MediaItemScanResult<TMovie> result,
+        TMovie incoming,
+        bool deepScan,
+        Option<MovieMetadata> maybeFullMetadata)
+    {
+        if (maybeFullMetadata.IsNone)
+        {
+            maybeFullMetadata = await GetFullMetadata(connectionParameters, library, result, incoming, deepScan);
+        }
+
+        foreach (MovieMetadata fullMetadata in maybeFullMetadata)
         {
             // TODO: move some of this code into this scanner
             // will have to merge JF, Emby, Plex logic
@@ -305,36 +418,30 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
     }
 
     private async Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateStatistics(
+        TConnectionParameters connectionParameters,
+        TLibrary library,
         MediaItemScanResult<TMovie> result,
         TMovie incoming,
-        string ffmpegPath,
-        string ffprobePath)
+        bool deepScan,
+        Option<MediaVersion> maybeMediaVersion)
     {
         TMovie existing = result.Item;
 
-        if (result.IsAdded || MediaServerEtag(existing) != MediaServerEtag(incoming) ||
+        if (deepScan || result.IsAdded || MediaServerEtag(existing) != MediaServerEtag(incoming) ||
             existing.MediaVersions.Head().Streams.Count == 0)
         {
-            if (_localFileSystem.FileExists(result.LocalPath))
+            if (maybeMediaVersion.IsNone)
             {
-                _logger.LogDebug("Refreshing {Attribute} for {Path}", "Statistics", result.LocalPath);
-                Either<BaseError, bool> refreshResult =
-                    await _localStatisticsProvider.RefreshStatistics(
-                        ffmpegPath,
-                        ffprobePath,
-                        existing,
-                        result.LocalPath);
+                maybeMediaVersion = await GetMediaServerStatistics(
+                    connectionParameters,
+                    library,
+                    result,
+                    incoming);
+            }
 
-                foreach (BaseError error in refreshResult.LeftToSeq())
-                {
-                    _logger.LogWarning(
-                        "Unable to refresh {Attribute} for media item {Path}. Error: {Error}",
-                        "Statistics",
-                        result.LocalPath,
-                        error.Value);
-                }
-
-                foreach (bool _ in refreshResult.RightToSeq())
+            foreach (MediaVersion mediaVersion in maybeMediaVersion)
+            {
+                if (await _metadataRepository.UpdateStatistics(result.Item, mediaVersion))
                 {
                     result.IsUpdated = true;
                 }
@@ -343,24 +450,29 @@ public abstract class MediaServerMovieLibraryScanner<TConnectionParameters, TLib
 
         return result;
     }
-
+    
+        
     private async Task<Either<BaseError, MediaItemScanResult<TMovie>>> UpdateSubtitles(
         MediaItemScanResult<TMovie> existing)
     {
         try
         {
-            // skip checking subtitles for files that don't exist locally
-            if (!_localFileSystem.FileExists(existing.LocalPath))
+            MediaVersion version = existing.Item.GetHeadVersion();
+            Option<MovieMetadata> maybeMetadata = existing.Item.MovieMetadata.HeadOrNone();
+            foreach (MovieMetadata metadata in maybeMetadata)
             {
-                return existing;
+                List<Subtitle> subtitles = version.Streams
+                    .Filter(s => s.MediaStreamKind is MediaStreamKind.Subtitle or MediaStreamKind.ExternalSubtitle)
+                    .Map(Subtitle.FromMediaStream)
+                    .ToList();
+
+                if (await _metadataRepository.UpdateSubtitles(metadata, subtitles))
+                {
+                    return existing;
+                }
             }
 
-            if (await _localSubtitlesProvider.UpdateSubtitles(existing.Item, existing.LocalPath, false))
-            {
-                return existing;
-            }
-
-            return BaseError.New("Failed to update local subtitles");
+            return BaseError.New("Failed to update media server subtitles");
         }
         catch (Exception ex)
         {

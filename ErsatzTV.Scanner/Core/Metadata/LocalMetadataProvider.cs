@@ -168,6 +168,25 @@ public class LocalMetadataProvider : ILocalMetadataProvider
         Option<OtherVideoMetadata> maybeMetadata = await LoadOtherVideoMetadata(nfoFileName);
         foreach (OtherVideoMetadata metadata in maybeMetadata)
         {
+            // merge path-based tags with nfo tags
+            string? folder = Path.GetDirectoryName(nfoFileName);
+            if (folder != null)
+            {
+                string libraryPath = otherVideo.LibraryPath.Path;
+                string parent = Optional(Directory.GetParent(libraryPath)).Match(
+                    di => di.FullName,
+                    () => libraryPath);
+
+                string diff = Path.GetRelativePath(parent, folder);
+
+                var tags = diff.Split(Path.DirectorySeparatorChar)
+                    .Filter(t => metadata.Tags.Any(mt => mt.Name == t) == false)
+                    .Map(t => new Tag { Name = t })
+                    .ToList();
+
+                metadata.Tags.AddRange(tags);
+            }
+
             return await ApplyMetadataUpdate(otherVideo, metadata);
         }
 
@@ -259,7 +278,8 @@ public class LocalMetadataProvider : ILocalMetadataProvider
                     Artists = nfo.Artists.Map(a => new MusicVideoArtist { Name = a }).ToList(),
                     Genres = nfo.Genres.Map(g => new Genre { Name = g }).ToList(),
                     Tags = nfo.Tags.Map(t => new Tag { Name = t }).ToList(),
-                    Studios = nfo.Studios.Map(s => new Studio { Name = s }).ToList()
+                    Studios = nfo.Studios.Map(s => new Studio { Name = s }).ToList(),
+                    Directors = nfo.Directors.Map(s => new Director { Name = s }).ToList()
                 };
             }
 
@@ -424,8 +444,8 @@ public class LocalMetadataProvider : ILocalMetadataProvider
                 updated = await UpdateMetadataCollections(
                     existing,
                     metadata,
-                    (_, _) => Task.FromResult(false),
-                    (_, _) => Task.FromResult(false),
+                    _televisionRepository.AddGenre,
+                    _televisionRepository.AddTag,
                     (_, _) => Task.FromResult(false),
                     _televisionRepository.AddActor) || updated;
 
@@ -813,6 +833,26 @@ public class LocalMetadataProvider : ILocalMetadataProvider
                     updated = true;
                 }
             }
+            
+            foreach (Director director in existing.Directors
+                         .Filter(d => metadata.Directors.All(d2 => d2.Name != d.Name)).ToList())
+            {
+                existing.Directors.Remove(director);
+                if (await _metadataRepository.RemoveDirector(director))
+                {
+                    updated = true;
+                }
+            }
+
+            foreach (Director director in metadata.Directors
+                         .Filter(d => existing.Directors.All(d2 => d2.Name != d.Name)).ToList())
+            {
+                existing.Directors.Add(director);
+                if (await _musicVideoRepository.AddDirector(existing, director))
+                {
+                    updated = true;
+                }
+            }
 
             return await _metadataRepository.Update(existing) || updated;
         }
@@ -1101,8 +1141,8 @@ public class LocalMetadataProvider : ILocalMetadataProvider
                         .ToList(),
                     Directors = nfo.Directors.Map(d => new Director { Name = d }).ToList(),
                     Writers = nfo.Writers.Map(w => new Writer { Name = w }).ToList(),
-                    Genres = new List<Genre>(),
-                    Tags = new List<Tag>(),
+                    Genres = nfo.Genres.Map(g => new Genre { Name = g }).ToList(),
+                    Tags = nfo.Tags.Map(t => new Tag { Name = t }).ToList(),
                     Studios = new List<Studio>(),
                     Artwork = new List<Artwork>()
                 };
@@ -1234,7 +1274,7 @@ public class LocalMetadataProvider : ILocalMetadataProvider
 
                     releaseDate = premiered;
                 }
-
+                
                 return new OtherVideoMetadata
                 {
                     MetadataKind = MetadataKind.Sidecar,

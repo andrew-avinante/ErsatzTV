@@ -18,12 +18,10 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
     private readonly ILibraryRepository _libraryRepository;
     private readonly ILogger<SynchronizeEmbyLibraryByIdHandler> _logger;
 
-    private readonly IEmbyApiClient _embyApiClient;
     private readonly IMediator _mediator;
     private readonly IMediaSourceRepository _mediaSourceRepository;
 
     public SynchronizeEmbyLibraryByIdHandler(
-        IEmbyApiClient embyApiClient,
         IMediator mediator,
         IMediaSourceRepository mediaSourceRepository,
         IEmbySecretStore embySecretStore,
@@ -33,7 +31,6 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
         IConfigElementRepository configElementRepository,
         ILogger<SynchronizeEmbyLibraryByIdHandler> logger)
     {
-        _embyApiClient = embyApiClient;
         _mediator = mediator;
         _mediaSourceRepository = mediaSourceRepository;
         _embySecretStore = embySecretStore;
@@ -68,16 +65,14 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
                         parameters.ConnectionParameters.ActiveConnection.Address,
                         parameters.ConnectionParameters.ApiKey,
                         parameters.Library,
-                        parameters.FFmpegPath,
-                        parameters.FFprobePath,
+                        parameters.DeepScan,
                         cancellationToken),
                 LibraryMediaKind.Shows =>
                     await _embyTelevisionLibraryScanner.ScanLibrary(
                         parameters.ConnectionParameters.ActiveConnection.Address,
                         parameters.ConnectionParameters.ApiKey,
                         parameters.Library,
-                        parameters.FFmpegPath,
-                        parameters.FFprobePath,
+                        parameters.DeepScan,
                         cancellationToken),
                 _ => Unit.Default
             };
@@ -86,22 +81,6 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
             {
                 parameters.Library.LastScan = DateTime.UtcNow;
                 await _libraryRepository.UpdateLastScan(parameters.Library);
-
-                // need to call get libraries to find library that contains collections (box sets)                
-                await _embyApiClient.GetLibraries(
-                    parameters.ConnectionParameters.ActiveConnection.Address,
-                    parameters.ConnectionParameters.ApiKey);
-
-                Either<BaseError, Unit> collectionResult = await _mediator.Send(
-                    new SynchronizeEmbyCollections(parameters.Library.MediaSourceId),
-                    cancellationToken);
-
-                collectionResult.BiIter(
-                    _ => _logger.LogDebug("Done synchronizing emby collections"),
-                    error => _logger.LogWarning(
-                        "Unable to synchronize emby collections for source {MediaSourceId}: {Error}",
-                        parameters.Library.MediaSourceId,
-                        error.Value));
             }
             
             foreach (BaseError error in result.LeftToSeq())
@@ -139,7 +118,8 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
                     request.ForceScan,
                     libraryRefreshInterval,
                     ffmpegPath,
-                    ffprobePath
+                    ffprobePath,
+                    request.DeepScan
                 ));
 
     private Task<Validation<BaseError, ConnectionParameters>> ValidateConnection(
@@ -203,7 +183,8 @@ public class SynchronizeEmbyLibraryByIdHandler : IRequestHandler<SynchronizeEmby
         bool ForceScan,
         int LibraryRefreshInterval,
         string FFmpegPath,
-        string FFprobePath);
+        string FFprobePath,
+        bool DeepScan);
 
     private record ConnectionParameters(EmbyConnection ActiveConnection)
     {

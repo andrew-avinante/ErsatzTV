@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using ErsatzTV.FFmpeg.Capabilities;
 using ErsatzTV.FFmpeg.Decoder;
 using ErsatzTV.FFmpeg.Encoder;
 using ErsatzTV.FFmpeg.Environment;
@@ -14,6 +15,7 @@ namespace ErsatzTV.FFmpeg.Pipeline;
 
 public abstract class PipelineBuilderBase : IPipelineBuilder
 {
+    private readonly IFFmpegCapabilities _ffmpegCapabilities;
     private readonly HardwareAccelerationMode _hardwareAccelerationMode;
     private readonly Option<VideoInputFile> _videoInputFile;
     private readonly Option<AudioInputFile> _audioInputFile;
@@ -24,6 +26,7 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
     private readonly ILogger _logger;
 
     protected PipelineBuilderBase(
+        IFFmpegCapabilities ffmpegCapabilities,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<VideoInputFile> videoInputFile,
         Option<AudioInputFile> audioInputFile,
@@ -33,6 +36,7 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
         string fontsFolder,
         ILogger logger)
     {
+        _ffmpegCapabilities = ffmpegCapabilities;
         _hardwareAccelerationMode = hardwareAccelerationMode;
         _videoInputFile = videoInputFile;
         _audioInputFile = audioInputFile;
@@ -170,22 +174,13 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
         SetStreamSeek(ffmpegState, videoInputFile, context, pipelineSteps);
         SetTimeLimit(ffmpegState, pipelineSteps);
 
-        FilterChain filterChain = FilterChain.Empty;
-        
-        if (desiredState.VideoFormat == VideoFormat.Copy)
-        {
-            pipelineSteps.Add(new EncoderCopyVideo());
-        }
-        else
-        {
-            filterChain = BuildVideoPipeline(
-                videoInputFile,
-                videoStream,
-                ffmpegState,
-                desiredState,
-                context,
-                pipelineSteps);
-        }
+        FilterChain filterChain = BuildVideoPipeline(
+            videoInputFile,
+            videoStream,
+            ffmpegState,
+            desiredState,
+            context,
+            pipelineSteps);
 
         if (_audioInputFile.IsNone)
         {
@@ -218,7 +213,7 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
         return new FFmpegPipeline(pipelineSteps);
     }
 
-    private Option<IDecoder> LogUnknownDecoder(
+    private void LogUnknownDecoder(
         HardwareAccelerationMode hardwareAccelerationMode,
         string videoFormat,
         string pixelFormat)
@@ -228,7 +223,6 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
             hardwareAccelerationMode,
             videoFormat,
             pixelFormat);
-        return Option<IDecoder>.None;
     }
 
     private Option<IEncoder> LogUnknownEncoder(HardwareAccelerationMode hardwareAccelerationMode, string videoFormat)
@@ -395,7 +389,10 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
         ffmpegState = SetAccelState(videoStream, ffmpegState, desiredState, context, pipelineSteps);
 
-        SetDecoder(videoInputFile, videoStream, ffmpegState, context, pipelineSteps);
+        // don't use explicit decoder with HLS Direct
+        Option<IDecoder> maybeDecoder = desiredState.VideoFormat == VideoFormat.Copy
+            ? None
+            : SetDecoder(videoInputFile, videoStream, ffmpegState, context);
 
         SetStillImageInfiniteLoop(videoInputFile, videoStream, ffmpegState);
         SetRealtimeInput(videoInputFile, desiredState);
@@ -411,6 +408,7 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
             _watermarkInputFile,
             _subtitleInputFile,
             context,
+            maybeDecoder,
             ffmpegState,
             desiredState,
             _fontsFolder,
@@ -421,36 +419,26 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
         return filterChain;
     }
 
-    protected abstract void SetDecoder(
+    protected abstract Option<IDecoder> SetDecoder(
         VideoInputFile videoInputFile,
         VideoStream videoStream,
         FFmpegState ffmpegState,
-        PipelineContext context,
-        ICollection<IPipelineStep> pipelineSteps);
+        PipelineContext context);
     
-    protected Option<IDecoder> GetSoftwareDecoder(VideoStream videoStream) =>
-        videoStream.Codec switch
+    protected Option<IDecoder> GetSoftwareDecoder(VideoStream videoStream)
+    {
+        Option<IDecoder> maybeDecoder = _ffmpegCapabilities.SoftwareDecoderForVideoFormat(videoStream.Codec);
+        if (maybeDecoder.IsNone)
         {
-            VideoFormat.Hevc => new DecoderHevc(),
-            VideoFormat.H264 => new DecoderH264(),
-            VideoFormat.Mpeg1Video => new DecoderMpeg1Video(),
-            VideoFormat.Mpeg2Video => new DecoderMpeg2Video(),
-            VideoFormat.Vc1 => new DecoderVc1(),
-            VideoFormat.MsMpeg4V2 => new DecoderMsMpeg4V2(),
-            VideoFormat.MsMpeg4V3 => new DecoderMsMpeg4V3(),
-            VideoFormat.Mpeg4 => new DecoderMpeg4(),
-            VideoFormat.Vp9 => new DecoderVp9(),
-
-            VideoFormat.Undetermined => new DecoderImplicit(),
-            VideoFormat.Copy => new DecoderImplicit(),
-            VideoFormat.GeneratedImage => new DecoderImplicit(),
-
-            _ => LogUnknownDecoder(
+            LogUnknownDecoder(
                 HardwareAccelerationMode.None,
                 videoStream.Codec,
-                videoStream.PixelFormat.Match(pf => pf.Name, () => string.Empty))
-        };
-    
+                videoStream.PixelFormat.Match(pf => pf.Name, () => string.Empty));
+        }
+
+        return maybeDecoder;
+    }
+
     protected Option<IEncoder> GetSoftwareEncoder(FrameState currentState, FrameState desiredState) =>
         desiredState.VideoFormat switch
         {
@@ -471,6 +459,7 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
         Option<WatermarkInputFile> watermarkInputFile,
         Option<SubtitleInputFile> subtitleInputFile,
         PipelineContext context,
+        Option<IDecoder> maybeDecoder,
         FFmpegState ffmpegState,
         FrameState desiredState,
         string fontsFolder,
@@ -478,6 +467,11 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
     private static void SetOutputTsOffset(FFmpegState ffmpegState, FrameState desiredState, ICollection<IPipelineStep> pipelineSteps)
     {
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return;
+        }
+
         if (ffmpegState.PtsOffset > 0)
         {
             foreach (int videoTrackTimeScale in desiredState.VideoTrackTimeScale)
@@ -489,6 +483,11 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
     private static void SetVideoBufferSizeOutput(FrameState desiredState, ICollection<IPipelineStep> pipelineSteps)
     {
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return;
+        }
+
         foreach (int desiredBufferSize in desiredState.VideoBufferSize)
         {
             pipelineSteps.Add(new VideoBufferSizeOutputOption(desiredBufferSize));
@@ -497,6 +496,11 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
     private static void SetVideoBitrateOutput(FrameState desiredState, ICollection<IPipelineStep> pipelineSteps)
     {
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return;
+        }
+
         foreach (int desiredBitrate in desiredState.VideoBitrate)
         {
             pipelineSteps.Add(new VideoBitrateOutputOption(desiredBitrate));
@@ -505,6 +509,11 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
     private static void SetVideoTrackTimescaleOutput(FrameState desiredState, ICollection<IPipelineStep> pipelineSteps)
     {
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return;
+        }
+
         foreach (int desiredTimeScale in desiredState.VideoTrackTimeScale)
         {
             pipelineSteps.Add(new VideoTrackTimescaleOutputOption(desiredTimeScale));
@@ -513,6 +522,11 @@ public abstract class PipelineBuilderBase : IPipelineBuilder
 
     private static void SetFrameRateOutput(FrameState desiredState, ICollection<IPipelineStep> pipelineSteps)
     {
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return;
+        }
+
         foreach (int desiredFrameRate in desiredState.FrameRate)
         {
             pipelineSteps.Add(new FrameRateOutputOption(desiredFrameRate));

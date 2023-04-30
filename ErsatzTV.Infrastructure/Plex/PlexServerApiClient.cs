@@ -1,7 +1,7 @@
-﻿using System.Xml.Serialization;
+﻿using System.Globalization;
+using System.Xml.Serialization;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
-using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Plex;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Core.Plex;
@@ -78,7 +78,7 @@ public class PlexServerApiClient : IPlexServerApiClient
         {
             return jsonService
                 .GetLibrarySectionContents(library.Key, skip, pageSize, token.AuthToken)
-                .Map(r => r.MediaContainer.Metadata.Filter(m => m.Media.Count > 0 && m.Media[0].Part.Count > 0))
+                .Map(r => r.MediaContainer.Metadata.Filter(m => m.Media.Count > 0 && m.Media.Any(media => media.Part.Count > 0)))
                 .Map(list => list.Map(metadata => ProjectToMovie(metadata, library.MediaSourceId)));
         }
 
@@ -179,32 +179,11 @@ public class PlexServerApiClient : IPlexServerApiClient
         Task<IEnumerable<PlexEpisode>> GetItems(IPlexServerApi xmlService, IPlexServerApi _, int skip, int pageSize)
         {
             return xmlService.GetSeasonChildren(seasonMetadataKey, skip, pageSize, token.AuthToken)
-                .Map(r => r.Metadata.Filter(m => m.Media.Count > 0 && m.Media[0].Part.Count > 0))
+                .Map(r => r.Metadata.Filter(m => m.Media.Count > 0 && m.Media.Any(media => media.Part.Count > 0)))
                 .Map(list => list.Map(metadata => ProjectToEpisode(metadata, library.MediaSourceId)));
         }
 
         return GetPagedLibraryContents(connection, CountItems, GetItems);
-    }
-
-    public async Task<Either<BaseError, MovieMetadata>> GetMovieMetadata(
-        PlexLibrary library,
-        string key,
-        PlexConnection connection,
-        PlexServerAuthToken token)
-    {
-        try
-        {
-            IPlexServerApi service = XmlServiceFor(connection.Uri);
-            return await service.GetVideoMetadata(key, token.AuthToken)
-                .Map(Optional)
-                .Map(r => r.Filter(m => m.Metadata.Media.Count > 0 && m.Metadata.Media[0].Part.Count > 0))
-                .MapT(response => ProjectToMovieMetadata(response.Metadata, library.MediaSourceId))
-                .Map(o => o.ToEither<BaseError>("Unable to locate metadata"));
-        }
-        catch (Exception ex)
-        {
-            return BaseError.New(ex.ToString());
-        }
     }
 
     public async Task<Either<BaseError, ShowMetadata>> GetShowMetadata(
@@ -239,13 +218,13 @@ public class PlexServerApiClient : IPlexServerApiClient
             Option<PlexXmlVideoMetadataResponseContainer> maybeResponse = await service
                 .GetVideoMetadata(key, token.AuthToken)
                 .Map(Optional)
-                .Map(r => r.Filter(m => m.Metadata.Media.Count > 0 && m.Metadata.Media[0].Part.Count > 0));
+                .Map(r => r.Filter(m => m.Metadata.Media.Count > 0 && m.Metadata.Media.Any(media => media.Part.Count > 0)));
             return maybeResponse.Match(
                 response =>
                 {
                     Option<MediaVersion> maybeVersion = ProjectToMediaVersion(response.Metadata);
                     return maybeVersion.Match<Either<BaseError, Tuple<MovieMetadata, MediaVersion>>>(
-                        version => Tuple(ProjectToMovieMetadata(response.Metadata, library.MediaSourceId), version),
+                        version => Tuple(ProjectToMovieMetadata(version, response.Metadata, library.MediaSourceId), version),
                         () => BaseError.New("Unable to locate metadata"));
                 },
                 () => BaseError.New("Unable to locate metadata"));
@@ -268,14 +247,14 @@ public class PlexServerApiClient : IPlexServerApiClient
             Option<PlexXmlVideoMetadataResponseContainer> maybeResponse = await service
                 .GetVideoMetadata(key, token.AuthToken)
                 .Map(Optional)
-                .Map(r => r.Filter(m => m.Metadata.Media.Count > 0 && m.Metadata.Media[0].Part.Count > 0));
+                .Map(r => r.Filter(m => m.Metadata.Media.Count > 0 && m.Metadata.Media.Any(media => media.Part.Count > 0)));
             return maybeResponse.Match(
                 response =>
                 {
                     Option<MediaVersion> maybeVersion = ProjectToMediaVersion(response.Metadata);
                     return maybeVersion.Match<Either<BaseError, Tuple<EpisodeMetadata, MediaVersion>>>(
                         version => Tuple(
-                            ProjectToEpisodeMetadata(response.Metadata, library.MediaSourceId),
+                            ProjectToEpisodeMetadata(version, response.Metadata, library.MediaSourceId),
                             version),
                         () => BaseError.New("Unable to locate metadata"));
                 },
@@ -401,12 +380,13 @@ public class PlexServerApiClient : IPlexServerApiClient
 
     private PlexMovie ProjectToMovie(PlexMetadataResponse response, int mediaSourceId)
     {
-        PlexMediaResponse<PlexPartResponse> media = response.Media.Head();
+        PlexMediaResponse<PlexPartResponse> media = response.Media
+            .Filter(media => media.Part.Any())
+            .MaxBy(media => media.Id);
+        
         PlexPartResponse part = media.Part.Head();
         DateTime dateAdded = DateTimeOffset.FromUnixTimeSeconds(response.AddedAt).DateTime;
         DateTime lastWriteTime = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
-
-        MovieMetadata metadata = ProjectToMovieMetadata(response, mediaSourceId);
 
         var version = new MediaVersion
         {
@@ -428,6 +408,8 @@ public class PlexServerApiClient : IPlexServerApiClient
             },
             Streams = new List<MediaStream>()
         };
+        
+        MovieMetadata metadata = ProjectToMovieMetadata(version, response, mediaSourceId);
 
         var movie = new PlexMovie
         {
@@ -441,7 +423,7 @@ public class PlexServerApiClient : IPlexServerApiClient
         return movie;
     }
 
-    private MovieMetadata ProjectToMovieMetadata(PlexMetadataResponse response, int mediaSourceId)
+    private MovieMetadata ProjectToMovieMetadata(MediaVersion version, PlexMetadataResponse response, int mediaSourceId)
     {
         DateTime dateAdded = DateTimeOffset.FromUnixTimeSeconds(response.AddedAt).DateTime;
         DateTime lastWriteTime = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
@@ -463,8 +445,15 @@ public class PlexServerApiClient : IPlexServerApiClient
             Actors = Optional(response.Role).Flatten().Map(r => ProjectToModel(r, dateAdded, lastWriteTime))
                 .ToList(),
             Directors = Optional(response.Director).Flatten().Map(d => new Director { Name = d.Tag }).ToList(),
-            Writers = Optional(response.Writer).Flatten().Map(w => new Writer { Name = w.Tag }).ToList()
+            Writers = Optional(response.Writer).Flatten().Map(w => new Writer { Name = w.Tag }).ToList(),
+            Subtitles = new List<Subtitle>()
         };
+        
+        var subtitleStreams = version.Streams
+            .Filter(s => s.MediaStreamKind is MediaStreamKind.Subtitle or MediaStreamKind.ExternalSubtitle)
+            .ToList();
+
+        metadata.Subtitles.AddRange(subtitleStreams.Map(Subtitle.FromMediaStream));
 
         if (response is PlexXmlMetadataResponse xml)
         {
@@ -541,7 +530,11 @@ public class PlexServerApiClient : IPlexServerApiClient
 
     private Option<MediaVersion> ProjectToMediaVersion(PlexXmlMetadataResponse response)
     {
-        List<PlexStreamResponse> streams = response.Media.Head().Part.Head().Stream;
+        PlexMediaResponse<PlexXmlPartResponse> media = response.Media
+            .Filter(media => media.Part.Any())
+            .MaxBy(media => media.Id);
+
+        List<PlexStreamResponse> streams = media.Part.Head().Stream;
         DateTime dateUpdated = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
         Option<PlexStreamResponse> maybeVideoStream = streams.Find(s => s.StreamType == 1);
         return maybeVideoStream.Map(
@@ -549,7 +542,9 @@ public class PlexServerApiClient : IPlexServerApiClient
             {
                 var version = new MediaVersion
                 {
-                    SampleAspectRatio = videoStream.PixelAspectRatio ?? "1:1",
+                    Duration = TimeSpan.FromMilliseconds(media.Duration),
+                    SampleAspectRatio = string.IsNullOrWhiteSpace(videoStream.PixelAspectRatio) ? "1:1"
+                        : videoStream.PixelAspectRatio,
                     VideoScanKind = videoStream.ScanType switch
                     {
                         "interlaced" => VideoScanKind.Interlaced,
@@ -557,46 +552,84 @@ public class PlexServerApiClient : IPlexServerApiClient
                         _ => VideoScanKind.Unknown
                     },
                     Streams = new List<MediaStream>(),
-                    DateUpdated = dateUpdated
+                    DateUpdated = dateUpdated,
+                    Width = videoStream.Width,
+                    Height = videoStream.Height,
+                    RFrameRate = videoStream.FrameRate,
+                    DisplayAspectRatio = media.AspectRatio == 0
+                        ? string.Empty
+                        : media.AspectRatio.ToString("0.00###", CultureInfo.InvariantCulture),
+                    Chapters = Optional(response.Chapters).Flatten().Map(ProjectToModel).ToList()
                 };
 
                 version.Streams.Add(
                     new MediaStream
                     {
+                        MediaVersionId = version.Id,
                         MediaStreamKind = MediaStreamKind.Video,
-                        Index = videoStream.Index,
+                        Index = videoStream.Index!.Value,
                         Codec = videoStream.Codec,
                         Profile = (videoStream.Profile ?? string.Empty).ToLowerInvariant(),
                         Default = videoStream.Default,
                         Language = videoStream.LanguageCode,
-                        Forced = videoStream.Forced
+                        Forced = videoStream.Forced,
+                        BitsPerRawSample = videoStream.BitDepth,
+                        ColorRange = (videoStream.ColorRange ?? string.Empty).ToLowerInvariant(),
+                        ColorSpace = (videoStream.ColorSpace ?? string.Empty).ToLowerInvariant(),
+                        ColorTransfer = (videoStream.ColorTrc ?? string.Empty).ToLowerInvariant(),
+                        ColorPrimaries = (videoStream.ColorPrimaries ?? string.Empty).ToLowerInvariant()
                     });
 
-                foreach (PlexStreamResponse audioStream in streams.Filter(s => s.StreamType == 2))
+                foreach (PlexStreamResponse audioStream in streams.Filter(s => s.StreamType == 2 && s.Index.HasValue))
                 {
                     var stream = new MediaStream
                     {
                         MediaVersionId = version.Id,
                         MediaStreamKind = MediaStreamKind.Audio,
-                        Index = audioStream.Index,
+                        Index = audioStream.Index.Value,
                         Codec = audioStream.Codec,
                         Profile = (audioStream.Profile ?? string.Empty).ToLowerInvariant(),
                         Channels = audioStream.Channels,
                         Default = audioStream.Default,
                         Forced = audioStream.Forced,
-                        Language = audioStream.LanguageCode
+                        Language = audioStream.LanguageCode,
+                        Title = audioStream.Title ?? string.Empty
                     };
 
                     version.Streams.Add(stream);
                 }
 
-                foreach (PlexStreamResponse subtitleStream in streams.Filter(s => s.StreamType == 3))
+                // filter to embedded subtitles, but ignore "embedded in video" closed-caption streams
+                foreach (PlexStreamResponse subtitleStream in
+                         streams.Filter(s => s.StreamType == 3 && s.Index.HasValue && !s.EmbeddedInVideo))
                 {
                     var stream = new MediaStream
                     {
                         MediaVersionId = version.Id,
                         MediaStreamKind = MediaStreamKind.Subtitle,
-                        Index = subtitleStream.Index,
+                        Index = subtitleStream.Index.Value,
+                        Codec = subtitleStream.Codec,
+                        Default = subtitleStream.Default,
+                        Forced = subtitleStream.Forced,
+                        Language = subtitleStream.LanguageCode
+                    };
+
+                    version.Streams.Add(stream);
+                }
+
+                // also include external subtitles
+                foreach (PlexStreamResponse subtitleStream in
+                         streams.Filter(s => s.StreamType == 3 && !s.Index.HasValue && !string.IsNullOrWhiteSpace(s.Key)))
+                {
+                    var stream = new MediaStream
+                    {
+                        MediaVersionId = version.Id,
+                        MediaStreamKind = MediaStreamKind.ExternalSubtitle,
+
+                        // hacky? maybe...
+                        FileName = subtitleStream.Key,
+                        Index = subtitleStream.Id,
+
                         Codec = subtitleStream.Codec,
                         Default = subtitleStream.Default,
                         Forced = subtitleStream.Forced,
@@ -799,12 +832,14 @@ public class PlexServerApiClient : IPlexServerApiClient
 
     private PlexEpisode ProjectToEpisode(PlexXmlMetadataResponse response, int mediaSourceId)
     {
-        PlexMediaResponse<PlexXmlPartResponse> media = response.Media.Head();
+        PlexMediaResponse<PlexXmlPartResponse> media = response.Media
+            .Filter(media => media.Part.Any())
+            .MaxBy(media => media.Id);
+        
         PlexXmlPartResponse part = media.Part.Head();
         DateTime dateAdded = DateTimeOffset.FromUnixTimeSeconds(response.AddedAt).DateTime;
         DateTime lastWriteTime = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
 
-        EpisodeMetadata metadata = ProjectToEpisodeMetadata(response, mediaSourceId);
         var version = new MediaVersion
         {
             Name = "Main",
@@ -825,6 +860,8 @@ public class PlexServerApiClient : IPlexServerApiClient
             // specifically omit stream details
             Streams = new List<MediaStream>()
         };
+        
+        EpisodeMetadata metadata = ProjectToEpisodeMetadata(version, response, mediaSourceId);
 
         var episode = new PlexEpisode
         {
@@ -838,7 +875,7 @@ public class PlexServerApiClient : IPlexServerApiClient
         return episode;
     }
 
-    private EpisodeMetadata ProjectToEpisodeMetadata(PlexMetadataResponse response, int mediaSourceId)
+    private EpisodeMetadata ProjectToEpisodeMetadata(MediaVersion version, PlexMetadataResponse response, int mediaSourceId)
     {
         DateTime dateAdded = DateTimeOffset.FromUnixTimeSeconds(response.AddedAt).DateTime;
         DateTime lastWriteTime = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
@@ -858,9 +895,16 @@ public class PlexServerApiClient : IPlexServerApiClient
                 .ToList(),
             Directors = Optional(response.Director).Flatten().Map(d => new Director { Name = d.Tag }).ToList(),
             Writers = Optional(response.Writer).Flatten().Map(w => new Writer { Name = w.Tag }).ToList(),
-            Tags = new List<Tag>()
+            Tags = new List<Tag>(),
+            Subtitles = new List<Subtitle>()
         };
 
+        var subtitleStreams = version.Streams
+            .Filter(s => s.MediaStreamKind is MediaStreamKind.Subtitle or MediaStreamKind.ExternalSubtitle)
+            .ToList();
+
+        metadata.Subtitles.AddRange(subtitleStreams.Map(Subtitle.FromMediaStream));
+        
         if (response is PlexXmlMetadataResponse xml)
         {
             metadata.Guids = Optional(xml.Guid).Flatten().Map(g => new MetadataGuid { Guid = g.Id }).ToList();
@@ -926,6 +970,14 @@ public class PlexServerApiClient : IPlexServerApiClient
         return actor;
     }
 
+    private static MediaChapter ProjectToModel(PlexChapterResponse chapter) =>
+        new()
+        {
+            ChapterId = chapter.Index,
+            StartTime = TimeSpan.FromMilliseconds(chapter.StartTimeOffset),
+            EndTime = TimeSpan.FromMilliseconds(chapter.EndTimeOffset)
+        };
+
     private Option<string> NormalizeGuid(string guid)
     {
         if (guid.StartsWith("plex://show") ||
@@ -959,7 +1011,7 @@ public class PlexServerApiClient : IPlexServerApiClient
 
         if (guid.StartsWith("local://"))
         {
-            _logger.LogDebug("Ignoring local Plex guid: {Guid}", guid);
+            // _logger.LogDebug("Ignoring local Plex guid: {Guid}", guid);
         }
         else
         {

@@ -78,7 +78,8 @@ public class ChronologicalContentTests
                     {
                         new()
                         {
-                            ReleaseDate = new DateTime(2020, 1, i)
+                            ReleaseDate = new DateTime(2020, 1, i),
+                            EpisodeNumber = 20 - i
                         }
                     }
                 })

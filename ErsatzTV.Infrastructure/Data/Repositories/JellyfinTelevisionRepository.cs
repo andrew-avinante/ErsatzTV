@@ -1,20 +1,28 @@
 ﻿using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Jellyfin;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<JellyfinTelevisionRepository> _logger;
 
-    public JellyfinTelevisionRepository(IDbContextFactory<TvContext> dbContextFactory) =>
+    public JellyfinTelevisionRepository(
+        IDbContextFactory<TvContext> dbContextFactory,
+        ILogger<JellyfinTelevisionRepository> logger)
+    {
         _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<List<JellyfinItemEtag>> GetExistingShows(JellyfinLibrary library)
     {
@@ -128,7 +136,8 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
 
     public async Task<Either<BaseError, MediaItemScanResult<JellyfinEpisode>>> GetOrAdd(
         JellyfinLibrary library,
-        JellyfinEpisode item)
+        JellyfinEpisode item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<JellyfinEpisode> maybeExisting = await dbContext.JellyfinEpisodes
@@ -138,6 +147,8 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
             .ThenInclude(mv => mv.MediaFiles)
             .Include(m => m.MediaVersions)
             .ThenInclude(mv => mv.Streams)
+            .Include(m => m.MediaVersions)
+            .ThenInclude(mv => mv.Chapters)
             .Include(m => m.EpisodeMetadata)
             .ThenInclude(mm => mm.Artwork)
             .Include(m => m.EpisodeMetadata)
@@ -162,7 +173,7 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
         foreach (JellyfinEpisode jellyfinEpisode in maybeExisting)
         {
             var result = new MediaItemScanResult<JellyfinEpisode>(jellyfinEpisode) { IsAdded = false };
-            if (jellyfinEpisode.Etag != item.Etag)
+            if (jellyfinEpisode.Etag != item.Etag || deepScan)
             {
                 await UpdateEpisode(dbContext, jellyfinEpisode, item);
                 result.IsUpdated = true;
@@ -340,6 +351,28 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
 
         return None;
     }
+
+    public async Task<Option<int>> FlagRemoteOnly(JellyfinLibrary library, JellyfinEpisode episode)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        episode.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT JellyfinEpisode.Id FROM JellyfinEpisode
+              INNER JOIN MediaItem MI ON MI.Id = JellyfinEpisode.Id
+              INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+              WHERE JellyfinEpisode.ItemId = @ItemId",
+            new { LibraryId = library.Id, episode.ItemId });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 3 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;    }
 
     private async Task UpdateShow(TvContext dbContext, JellyfinShow existing, JellyfinShow incoming)
     {
@@ -660,6 +693,36 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
         {
             metadata.Guids.Add(guid);
         }
+        
+        // genres
+        foreach (Genre genre in metadata.Genres
+                     .Filter(g => incomingMetadata.Genres.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Genres.Remove(genre);
+        }
+
+        foreach (Genre genre in incomingMetadata.Genres
+                     .Filter(g => metadata.Genres.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Genres.Add(genre);
+        }
+        
+        // tags
+        foreach (Tag tag in metadata.Tags
+                     .Filter(g => incomingMetadata.Tags.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Tags.Remove(tag);
+        }
+
+        foreach (Tag tag in incomingMetadata.Tags
+                     .Filter(g => metadata.Tags.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Tags.Add(tag);
+        }
 
         var paths = incomingMetadata.Artwork.Map(a => a.Path).ToList();
         foreach (Artwork artworkToRemove in metadata.Artwork
@@ -668,12 +731,13 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
         {
             metadata.Artwork.Remove(artworkToRemove);
         }
-
+        
         // version
         MediaVersion version = existing.MediaVersions.Head();
         MediaVersion incomingVersion = incoming.MediaVersions.Head();
         version.Name = incomingVersion.Name;
         version.DateAdded = incomingVersion.DateAdded;
+        version.Chapters = incomingVersion.Chapters;
 
         // media file
         MediaFile file = version.MediaFiles.Head();
@@ -748,6 +812,11 @@ public class JellyfinTelevisionRepository : IJellyfinTelevisionRepository
     {
         try
         {
+            if (await MediaItemRepository.MediaFileAlreadyExists(episode, library.Paths.Head().Id, dbContext, _logger))
+            {
+                return new MediaFileAlreadyExists();
+            }
+
             // blank out etag for initial save in case other updates fail
             string etag = episode.Etag;
             episode.Etag = string.Empty;

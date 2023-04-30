@@ -2,19 +2,27 @@
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Emby;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class EmbyTelevisionRepository : IEmbyTelevisionRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<EmbyTelevisionRepository> _logger;
 
-    public EmbyTelevisionRepository(IDbContextFactory<TvContext> dbContextFactory) =>
+    public EmbyTelevisionRepository(
+        IDbContextFactory<TvContext> dbContextFactory,
+        ILogger<EmbyTelevisionRepository> logger)
+    {
         _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<List<EmbyItemEtag>> GetExistingShows(EmbyLibrary library)
     {
@@ -124,7 +132,8 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
 
     public async Task<Either<BaseError, MediaItemScanResult<EmbyEpisode>>> GetOrAdd(
         EmbyLibrary library,
-        EmbyEpisode item)
+        EmbyEpisode item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<EmbyEpisode> maybeExisting = await dbContext.EmbyEpisodes
@@ -134,6 +143,8 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
             .ThenInclude(mv => mv.MediaFiles)
             .Include(m => m.MediaVersions)
             .ThenInclude(mv => mv.Streams)
+            .Include(m => m.MediaVersions)
+            .ThenInclude(mv => mv.Chapters)
             .Include(m => m.EpisodeMetadata)
             .ThenInclude(mm => mm.Artwork)
             .Include(m => m.EpisodeMetadata)
@@ -158,7 +169,7 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
         foreach (EmbyEpisode embyEpisode in maybeExisting)
         {
             var result = new MediaItemScanResult<EmbyEpisode>(embyEpisode) { IsAdded = false };
-            if (embyEpisode.Etag != item.Etag)
+            if (embyEpisode.Etag != item.Etag || deepScan)
             {
                 await UpdateEpisode(dbContext, embyEpisode, item);
                 result.IsUpdated = true;
@@ -331,6 +342,29 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
         {
             return await dbContext.Connection.ExecuteAsync(
                 @"UPDATE MediaItem SET State = 2 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;
+    }
+
+    public async Task<Option<int>> FlagRemoteOnly(EmbyLibrary library, EmbyEpisode episode)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        episode.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT EmbyEpisode.Id FROM EmbyEpisode
+              INNER JOIN MediaItem MI ON MI.Id = EmbyEpisode.Id
+              INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+              WHERE EmbyEpisode.ItemId = @ItemId",
+            new { LibraryId = library.Id, episode.ItemId });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 3 WHERE Id = @Id",
                 new { Id = id }).Map(count => count > 0 ? Some(id) : None);
         }
 
@@ -657,6 +691,36 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
             metadata.Guids.Add(guid);
         }
 
+        // genres
+        foreach (Genre genre in metadata.Genres
+                     .Filter(g => incomingMetadata.Genres.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Genres.Remove(genre);
+        }
+
+        foreach (Genre genre in incomingMetadata.Genres
+                     .Filter(g => metadata.Genres.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Genres.Add(genre);
+        }
+        
+        // tags
+        foreach (Tag tag in metadata.Tags
+                     .Filter(g => incomingMetadata.Tags.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Tags.Remove(tag);
+        }
+
+        foreach (Tag tag in incomingMetadata.Tags
+                     .Filter(g => metadata.Tags.All(g2 => g2.Name != g.Name))
+                     .ToList())
+        {
+            metadata.Tags.Add(tag);
+        }
+
         var paths = incomingMetadata.Artwork.Map(a => a.Path).ToList();
         foreach (Artwork artworkToRemove in metadata.Artwork
                      .Filter(a => !paths.Contains(a.Path))
@@ -664,12 +728,13 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
         {
             metadata.Artwork.Remove(artworkToRemove);
         }
-
+        
         // version
         MediaVersion version = existing.MediaVersions.Head();
         MediaVersion incomingVersion = incoming.MediaVersions.Head();
         version.Name = incomingVersion.Name;
         version.DateAdded = incomingVersion.DateAdded;
+        version.Chapters = incomingVersion.Chapters;
 
         // media file
         MediaFile file = version.MediaFiles.Head();
@@ -744,6 +809,11 @@ public class EmbyTelevisionRepository : IEmbyTelevisionRepository
     {
         try
         {
+            if (await MediaItemRepository.MediaFileAlreadyExists(episode, library.Paths.Head().Id, dbContext, _logger))
+            {
+                return new MediaFileAlreadyExists();
+            }
+
             // blank out etag for initial save in case other updates fail
             string etag = episode.Etag;
             episode.Etag = string.Empty;

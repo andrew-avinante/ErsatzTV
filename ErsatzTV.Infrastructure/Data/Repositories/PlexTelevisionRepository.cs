@@ -1,20 +1,28 @@
 ﻿using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Core.Plex;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class PlexTelevisionRepository : IPlexTelevisionRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<PlexTelevisionRepository> _logger;
 
-    public PlexTelevisionRepository(IDbContextFactory<TvContext> dbContextFactory) =>
+    public PlexTelevisionRepository(
+        IDbContextFactory<TvContext> dbContextFactory,
+        ILogger<PlexTelevisionRepository> logger)
+    {
         _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<bool> FlagNormal(PlexLibrary library, PlexEpisode episode)
     {
@@ -78,6 +86,29 @@ public class PlexTelevisionRepository : IPlexTelevisionRepository
         {
             return await dbContext.Connection.ExecuteAsync(
                 @"UPDATE MediaItem SET State = 2 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;
+    }
+
+    public async Task<Option<int>> FlagRemoteOnly(PlexLibrary library, PlexEpisode episode)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        episode.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT PlexEpisode.Id FROM PlexEpisode
+            INNER JOIN MediaItem MI ON MI.Id = PlexEpisode.Id
+            INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+            WHERE PlexEpisode.Key = @Key",
+            new { LibraryId = library.Id, episode.Key });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 3 WHERE Id = @Id",
                 new { Id = id }).Map(count => count > 0 ? Some(id) : None);
         }
 
@@ -183,7 +214,8 @@ public class PlexTelevisionRepository : IPlexTelevisionRepository
 
     public async Task<Either<BaseError, MediaItemScanResult<PlexEpisode>>> GetOrAdd(
         PlexLibrary library,
-        PlexEpisode item)
+        PlexEpisode item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<PlexEpisode> maybeExisting = await dbContext.PlexEpisodes
@@ -219,9 +251,15 @@ public class PlexTelevisionRepository : IPlexTelevisionRepository
         foreach (PlexEpisode plexEpisode in maybeExisting)
         {
             var result = new MediaItemScanResult<PlexEpisode>(plexEpisode) { IsAdded = false };
+            
+            // deepScan isn't needed here since we create our own plex etags
             if (plexEpisode.Etag != item.Etag)
             {
-                await UpdateEpisodePath(dbContext, plexEpisode, item);
+                foreach (BaseError error in await UpdateEpisodePath(dbContext, plexEpisode, item))
+                {
+                    return error;
+                }
+
                 result.IsUpdated = true;
             }
 
@@ -388,16 +426,16 @@ public class PlexTelevisionRepository : IPlexTelevisionRepository
         }
     }
 
-    private static async Task<Either<BaseError, MediaItemScanResult<PlexEpisode>>> AddEpisode(
+    private async Task<Either<BaseError, MediaItemScanResult<PlexEpisode>>> AddEpisode(
         TvContext dbContext,
         PlexLibrary library,
         PlexEpisode item)
     {
         try
         {
-            if (dbContext.MediaFiles.Any(mf => mf.Path == item.MediaVersions.Head().MediaFiles.Head().Path))
+            if (await MediaItemRepository.MediaFileAlreadyExists(item, library.Paths.Head().Id, dbContext, _logger))
             {
-                return BaseError.New("Multi-episode files are not yet supported");
+                return new MediaFileAlreadyExists();
             }
 
             // blank out etag for initial save in case stats/metadata/etc updates fail
@@ -432,29 +470,48 @@ public class PlexTelevisionRepository : IPlexTelevisionRepository
         }
     }
 
-    private static async Task UpdateEpisodePath(TvContext dbContext, PlexEpisode existing, PlexEpisode incoming)
+    private async Task<Option<BaseError>> UpdateEpisodePath(
+        TvContext dbContext,
+        PlexEpisode existing,
+        PlexEpisode incoming)
     {
-        // library path is used for search indexing later
-        incoming.LibraryPath = existing.LibraryPath;
-        incoming.Id = existing.Id;
+        try
+        {
+            // library path is used for search indexing later
+            incoming.LibraryPath = existing.LibraryPath;
+            incoming.Id = existing.Id;
 
-        // version
-        MediaVersion version = existing.MediaVersions.Head();
-        MediaVersion incomingVersion = incoming.MediaVersions.Head();
-        version.Name = incomingVersion.Name;
-        version.DateAdded = incomingVersion.DateAdded;
+            // version
+            MediaVersion version = existing.MediaVersions.Head();
+            MediaVersion incomingVersion = incoming.MediaVersions.Head();
+            version.Name = incomingVersion.Name;
+            version.DateAdded = incomingVersion.DateAdded;
 
-        await dbContext.Connection.ExecuteAsync(
-            @"UPDATE MediaVersion SET Name = @Name, DateAdded = @DateAdded WHERE Id = @Id",
-            new { version.Name, version.DateAdded, version.Id });
+            // media file
+            MediaFile file = version.MediaFiles.Head();
+            MediaFile incomingFile = incomingVersion.MediaFiles.Head();
 
-        // media file
-        MediaFile file = version.MediaFiles.Head();
-        MediaFile incomingFile = incomingVersion.MediaFiles.Head();
-        file.Path = incomingFile.Path;
+            _logger.LogDebug(
+                "Updating plex episode (key {Key}) path from {Existing} to {Incoming}",
+                existing.Key,
+                file.Path,
+                incomingFile.Path);
 
-        await dbContext.Connection.ExecuteAsync(
-            @"UPDATE MediaFile SET Path = @Path WHERE Id = @Id",
-            new { file.Path, file.Id });
+            file.Path = incomingFile.Path;
+
+            await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaVersion SET Name = @Name, DateAdded = @DateAdded WHERE Id = @Id",
+                new { version.Name, version.DateAdded, version.Id });
+            
+            await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaFile SET Path = @Path WHERE Id = @Id",
+                new { file.Path, file.Id });
+
+            return Option<BaseError>.None;
+        }
+        catch (Exception)
+        {
+            return BaseError.New("Failed to update episode path");
+        }
     }
 }

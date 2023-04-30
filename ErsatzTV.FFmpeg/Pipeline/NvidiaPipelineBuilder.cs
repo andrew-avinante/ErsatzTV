@@ -19,6 +19,7 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
     private readonly ILogger _logger;
 
     public NvidiaPipelineBuilder(
+        IFFmpegCapabilities ffmpegCapabilities,
         IHardwareCapabilities hardwareCapabilities,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<VideoInputFile> videoInputFile,
@@ -28,6 +29,7 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         string reportsFolder,
         string fontsFolder,
         ILogger logger) : base(
+        ffmpegCapabilities,
         hardwareAccelerationMode,
         videoInputFile,
         audioInputFile,
@@ -48,11 +50,11 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         PipelineContext context,
         ICollection<IPipelineStep> pipelineSteps)
     {
-        bool canDecode = _hardwareCapabilities.CanDecode(
+        FFmpegCapability decodeCapability = _hardwareCapabilities.CanDecode(
             videoStream.Codec,
             desiredState.VideoProfile,
             videoStream.PixelFormat);
-        bool canEncode = _hardwareCapabilities.CanEncode(
+        FFmpegCapability encodeCapability = _hardwareCapabilities.CanEncode(
             desiredState.VideoFormat,
             desiredState.VideoProfile,
             desiredState.PixelFormat);
@@ -60,10 +62,10 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         // mpeg2_cuvid seems to have issues when yadif_cuda is used, so just use software decoding
         if (context.ShouldDeinterlace && videoStream.Codec == VideoFormat.Mpeg2Video)
         {
-            canDecode = false;
+            decodeCapability = FFmpegCapability.Software;
         }
 
-        if (canDecode || canEncode)
+        if (decodeCapability == FFmpegCapability.Hardware || encodeCapability == FFmpegCapability.Hardware)
         {
             pipelineSteps.Add(new CudaHardwareAccelerationOption());
         }
@@ -71,21 +73,20 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         // disable hw accel if decoder/encoder isn't supported
         return ffmpegState with
         {
-            DecoderHardwareAccelerationMode = canDecode
+            DecoderHardwareAccelerationMode = decodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.Nvenc
                 : HardwareAccelerationMode.None,
-            EncoderHardwareAccelerationMode = canEncode
+            EncoderHardwareAccelerationMode = encodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.Nvenc
                 : HardwareAccelerationMode.None
         };
     }
 
-    protected override void SetDecoder(
+    protected override Option<IDecoder> SetDecoder(
         VideoInputFile videoInputFile,
         VideoStream videoStream,
         FFmpegState ffmpegState,
-        PipelineContext context,
-        ICollection<IPipelineStep> pipelineSteps)
+        PipelineContext context)
     {
         Option<IDecoder> maybeDecoder = (ffmpegState.DecoderHardwareAccelerationMode, videoStream.Codec) switch
         {
@@ -98,6 +99,8 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
             (HardwareAccelerationMode.Nvenc, VideoFormat.Vp9) => new DecoderVp9Cuvid(HardwareAccelerationMode.Nvenc),
             (HardwareAccelerationMode.Nvenc, VideoFormat.Mpeg4) =>
                 new DecoderMpeg4Cuvid(HardwareAccelerationMode.Nvenc),
+            (HardwareAccelerationMode.Nvenc, VideoFormat.Av1) =>
+                new DecoderAv1Cuvid(HardwareAccelerationMode.Nvenc),
 
             _ => GetSoftwareDecoder(videoStream)
         };
@@ -105,7 +108,10 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         foreach (IDecoder decoder in maybeDecoder)
         {
             videoInputFile.AddOption(decoder);
+            return Some(decoder);
         }
+
+        return None;
     }
 
     protected override FilterChain SetVideoFilters(
@@ -114,6 +120,7 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         Option<WatermarkInputFile> watermarkInputFile,
         Option<SubtitleInputFile> subtitleInputFile,
         PipelineContext context,
+        Option<IDecoder> maybeDecoder,
         FFmpegState ffmpegState,
         FrameState desiredState,
         string fontsFolder,
@@ -132,10 +139,12 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                 : videoStream.PixelFormat,
             
             IsAnamorphic = videoStream.IsAnamorphic,
-            FrameDataLocation = ffmpegState.DecoderHardwareAccelerationMode == HardwareAccelerationMode.Nvenc
-                ? FrameDataLocation.Hardware
-                : FrameDataLocation.Software
         };
+        
+        foreach (IDecoder decoder in maybeDecoder)
+        {
+            currentState = decoder.NextState(currentState);
+        }
 
         // if (context.HasSubtitleOverlay || context.HasWatermark)
         // {
@@ -214,7 +223,7 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
             Option<IEncoder> maybeEncoder =
                 (ffmpegState.EncoderHardwareAccelerationMode, desiredState.VideoFormat) switch
                 {
-                    (HardwareAccelerationMode.Nvenc, VideoFormat.Hevc) => new EncoderHevcNvenc(),
+                    (HardwareAccelerationMode.Nvenc, VideoFormat.Hevc) => new EncoderHevcNvenc(_hardwareCapabilities),
                     (HardwareAccelerationMode.Nvenc, VideoFormat.H264) => new EncoderH264Nvenc(),
 
                     (_, _) => GetSoftwareEncoder(currentState, desiredState)
@@ -266,9 +275,16 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                 }
             }
 
+            // vp9 seems to lose color metadata through the ffmpeg pipeline
+            // clearing color params will force it to be re-added
+            if (videoStream.Codec == "vp9")
+            {
+                videoStream = videoStream with { ColorParams = ColorParams.Unknown };
+            }
+
             if (!videoStream.ColorParams.IsBt709)
             {
-                _logger.LogDebug("Adding colorspace filter");
+                // _logger.LogDebug("Adding colorspace filter");
                 var colorspace = new ColorspaceFilter(currentState, videoStream, format, false);
 
                 currentState = colorspace.NextState(currentState);
@@ -285,10 +301,18 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                     _logger.LogDebug(
                         "HasSubtitleOverlay || HasWatermark && FrameDataLocation == FrameDataLocation.Hardware");
 
-                    var hardwareDownload = new CudaHardwareDownloadFilter(currentState.PixelFormat);
+                    var hardwareDownload = new CudaHardwareDownloadFilter(currentState.PixelFormat, None);
                     currentState = hardwareDownload.NextState(currentState);
                     result.Add(hardwareDownload);
                 }
+            }
+            
+            if (currentState.FrameDataLocation == FrameDataLocation.Hardware &&
+                ffmpegState.EncoderHardwareAccelerationMode == HardwareAccelerationMode.None)
+            {
+                var hardwareDownload = new CudaHardwareDownloadFilter(currentState.PixelFormat, Some(format));
+                currentState = hardwareDownload.NextState(currentState);
+                result.Add(hardwareDownload);
             }
 
             if (currentState.PixelFormat.Map(f => f.FFmpegName) != format.FFmpegName)
@@ -324,14 +348,6 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                 {
                     pipelineSteps.Add(new PixelFormatOutputOption(format));
                 }
-            }
-
-            if (currentState.FrameDataLocation == FrameDataLocation.Hardware &&
-                ffmpegState.EncoderHardwareAccelerationMode == HardwareAccelerationMode.None)
-            {
-                var hardwareDownload = new CudaHardwareDownloadFilter(Some(format));
-                currentState = hardwareDownload.NextState(currentState);
-                result.Add(hardwareDownload);
             }
         }
 
@@ -391,6 +407,8 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                 videoStream.SquarePixelFrameSize(currentState.PaddedSize),
                 _logger);
             watermarkOverlayFilterSteps.Add(watermarkFilter);
+
+            currentState = watermarkFilter.NextState(currentState);
         }
 
         return currentState;
@@ -466,7 +484,7 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
                 {
                     if (currentState.FrameDataLocation == FrameDataLocation.Hardware)
                     {
-                        var cudaDownload = new CudaHardwareDownloadFilter(currentState.PixelFormat);
+                        var cudaDownload = new CudaHardwareDownloadFilter(currentState.PixelFormat, None);
                         currentState = cudaDownload.NextState(currentState);
                         videoInputFile.FilterSteps.Add(cudaDownload);
                     }
@@ -519,12 +537,20 @@ public class NvidiaPipelineBuilder : SoftwarePipelineBuilder
         FrameState currentState)
     {
         IPipelineFilterStep scaleStep;
+
+        bool needsToScale = currentState.ScaledSize != desiredState.ScaledSize;
+        if (!needsToScale)
+        {
+            return currentState;
+        }
+
+        bool decodedToSoftware = ffmpegState.DecoderHardwareAccelerationMode == HardwareAccelerationMode.None;
+        bool softwareEncoder = ffmpegState.EncoderHardwareAccelerationMode == HardwareAccelerationMode.None;
+        bool noHardwareFilters = context is
+            { HasWatermark: false, HasSubtitleOverlay: false, ShouldDeinterlace: false };
+        bool needsToPad = currentState.PaddedSize != desiredState.PaddedSize;
         
-        if (currentState.ScaledSize != desiredState.ScaledSize && ffmpegState is
-            {
-                DecoderHardwareAccelerationMode: HardwareAccelerationMode.None,
-                EncoderHardwareAccelerationMode: HardwareAccelerationMode.None
-            } && context is { HasWatermark: false, HasSubtitleOverlay: false, ShouldDeinterlace: false })
+        if (decodedToSoftware && (needsToPad || noHardwareFilters && softwareEncoder))
         {
             scaleStep = new ScaleFilter(
                 currentState,

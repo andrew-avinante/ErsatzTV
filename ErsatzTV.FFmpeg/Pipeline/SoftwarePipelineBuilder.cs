@@ -1,3 +1,4 @@
+using ErsatzTV.FFmpeg.Capabilities;
 using ErsatzTV.FFmpeg.Decoder;
 using ErsatzTV.FFmpeg.Encoder;
 using ErsatzTV.FFmpeg.Filter;
@@ -13,6 +14,7 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
     private readonly ILogger _logger;
 
     public SoftwarePipelineBuilder(
+        IFFmpegCapabilities ffmpegCapabilities,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<VideoInputFile> videoInputFile,
         Option<AudioInputFile> audioInputFile,
@@ -21,6 +23,7 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
         string reportsFolder,
         string fontsFolder,
         ILogger logger) : base(
+        ffmpegCapabilities,
         hardwareAccelerationMode,
         videoInputFile,
         audioInputFile,
@@ -44,17 +47,19 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
         EncoderHardwareAccelerationMode = HardwareAccelerationMode.None
     };
 
-    protected override void SetDecoder(
+    protected override Option<IDecoder> SetDecoder(
         VideoInputFile videoInputFile,
         VideoStream videoStream,
         FFmpegState ffmpegState,
-        PipelineContext context,
-        ICollection<IPipelineStep> pipelineSteps)
+        PipelineContext context)
     {
         foreach (IDecoder decoder in GetSoftwareDecoder(videoStream))
         {
             videoInputFile.AddOption(decoder);
+            return Some(decoder);
         }
+
+        return None;
     }
 
     protected virtual Option<IEncoder> GetEncoder(
@@ -71,6 +76,7 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
         Option<WatermarkInputFile> watermarkInputFile,
         Option<SubtitleInputFile> subtitleInputFile,
         PipelineContext context,
+        Option<IDecoder> maybeDecoder,
         FFmpegState ffmpegState,
         FrameState desiredState,
         string fontsFolder,
@@ -87,20 +93,34 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
             ScaledSize = videoStream.FrameSize,
             PaddedSize = videoStream.FrameSize
         };
-        
-        SetDeinterlace(videoInputFile, context, currentState);
 
-        currentState = SetScale(videoInputFile, videoStream, desiredState, currentState);
-        currentState = SetPad(videoInputFile, videoStream, desiredState, currentState);
-        SetSubtitle(videoInputFile, subtitleInputFile, context, desiredState, fontsFolder, subtitleOverlayFilterSteps);
-        SetWatermark(
-            videoStream,
-            watermarkInputFile,
-            context,
-            ffmpegState,
-            desiredState,
-            currentState,
-            watermarkOverlayFilterSteps);
+        foreach (IDecoder decoder in maybeDecoder)
+        {
+            currentState = decoder.NextState(currentState);
+        }
+
+        if (desiredState.VideoFormat != VideoFormat.Copy)
+        {
+            SetDeinterlace(videoInputFile, context, currentState);
+
+            currentState = SetScale(videoInputFile, videoStream, desiredState, currentState);
+            currentState = SetPad(videoInputFile, videoStream, desiredState, currentState);
+            SetSubtitle(
+                videoInputFile,
+                subtitleInputFile,
+                context,
+                desiredState,
+                fontsFolder,
+                subtitleOverlayFilterSteps);
+            SetWatermark(
+                videoStream,
+                watermarkInputFile,
+                context,
+                ffmpegState,
+                desiredState,
+                currentState,
+                watermarkOverlayFilterSteps);
+        }
 
         // after everything else is done, apply the encoder
         if (pipelineSteps.OfType<IEncoder>().All(e => e.Kind != StreamKind.Video))
@@ -110,6 +130,12 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
                 pipelineSteps.Add(encoder);
                 videoInputFile.FilterSteps.Add(encoder);
             }
+        }
+        
+        // after decoder/encoder, return hls direct
+        if (desiredState.VideoFormat == VideoFormat.Copy)
+        {
+            return FilterChain.Empty;
         }
 
         List<IPipelineFilterStep> pixelFormatFilterSteps = SetPixelFormat(
@@ -139,7 +165,7 @@ public class SoftwarePipelineBuilder : PipelineBuilderBase
         {
             if (!videoStream.ColorParams.IsBt709)
             {
-                _logger.LogDebug("Adding colorspace filter");
+                // _logger.LogDebug("Adding colorspace filter");
                 var colorspace = new ColorspaceFilter(currentState, videoStream, pixelFormat);
                 currentState = colorspace.NextState(currentState);
                 result.Add(colorspace);

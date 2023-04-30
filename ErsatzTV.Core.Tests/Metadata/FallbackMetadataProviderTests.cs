@@ -70,6 +70,30 @@ public class FallbackMetadataProviderTests
         // metadata.Season.Should().Be(season);
         metadata.Head().EpisodeNumber.Should().Be(episode);
     }
+    
+    [TestCase("Awesome Show - S01_BLAH.mkv", 0)]
+    [TestCase("Awesome Show - NO_EPISODE_NUMBER_HERE.mkv", 0)]
+    public void GetFallbackMetadata_ShouldHandleNonEpisodes(string path, int episode)
+    {
+        List<EpisodeMetadata> metadata = _fallbackMetadataProvider.GetFallbackMetadata(
+            new Episode
+            {
+                LibraryPath = new LibraryPath(),
+                MediaVersions = new List<MediaVersion>
+                {
+                    new()
+                    {
+                        MediaFiles = new List<MediaFile>
+                        {
+                            new() { Path = path }
+                        }
+                    }
+                }
+            });
+
+        metadata.Count.Should().Be(1);
+        metadata.Head().EpisodeNumber.Should().Be(episode);
+    }
 
     [Test]
     [TestCase("Awesome Show - s01e02-s01e03.mkv", 1, 2, 3)]
@@ -125,5 +149,29 @@ public class FallbackMetadataProviderTests
 
         metadata.Should().NotBeNull();
         metadata.Title.Should().Be(expectedTitle);
+    }
+
+    [Test]
+    [TestCase(@"/Whatever/American Dad! S01", 1)]
+    [TestCase(@"/Whatever/Season 2", 2)]
+    [TestCase(@"/Whatever/Season 02", 2)]
+    [TestCase(@"/Whatever/Staffel 2", 2)]
+    [TestCase(@"/Whatever/Staffel 02", 2)]
+    [TestCase(@"/Whatever/Seinfeld/S02", 2)]
+    [TestCase(@"/Whatever/Seinfeld/2", 2)]
+    [TestCase(@"/Whatever/Season 2009", 2009)]
+    [TestCase(@"/Whatever/Season1", 1)]
+    [TestCase(@"/Bojack Horseman/Bojack.Horseman.S04.1080p.WEB.x264-ABBA", 4)]
+    [TestCase(@"/Whatever/Season 7 (2016)", 7)]
+    [TestCase(@"/Whatever/Season (8)", null)]
+    [TestCase(@"/Whatever/s06e05", null)]
+    [TestCase(@"/Whatever/The.Legend.of.Condor.Heroes.2017.V2.web-dl.1080p.h264.aac-hdctv", null)]
+    [TestCase(@"/Whatever/extras", null)]
+    [TestCase(@"/Whatever/specials", 0)]
+    [TestCase(@"Stargate SG1 S08", 8)]
+    public void GetSeasonNumberForFolder_ShouldHandleVariousFormats(string folder, int? season)
+    {
+        Option<int> actual = _fallbackMetadataProvider.GetSeasonNumberForFolder(folder);
+        actual.Should<Option<int>>().Be(Optional(season));
     }
 }

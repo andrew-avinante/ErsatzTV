@@ -6,7 +6,6 @@ using ErsatzTV.Core.Interfaces.Plex;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Core.Plex;
-using ErsatzTV.Scanner.Core.Interfaces.Metadata;
 using ErsatzTV.Scanner.Core.Metadata;
 using Microsoft.Extensions.Logging;
 
@@ -33,13 +32,10 @@ public class PlexMovieLibraryScanner :
         IPlexMovieRepository plexMovieRepository,
         IPlexPathReplacementService plexPathReplacementService,
         ILocalFileSystem localFileSystem,
-        ILocalStatisticsProvider localStatisticsProvider,
-        ILocalSubtitlesProvider localSubtitlesProvider,
         ILogger<PlexMovieLibraryScanner> logger)
         : base(
-            localStatisticsProvider,
-            localSubtitlesProvider,
             localFileSystem,
+            metadataRepository,
             mediator,
             logger)
     {
@@ -52,12 +48,13 @@ public class PlexMovieLibraryScanner :
         _logger = logger;
     }
 
+    protected override bool ServerSupportsRemoteStreaming => true;
+    protected override bool ServerReturnsStatisticsWithMetadata => true;
+
     public async Task<Either<BaseError, Unit>> ScanLibrary(
         PlexConnection connection,
         PlexServerAuthToken token,
         PlexLibrary library,
-        string ffmpegPath,
-        string ffprobePath,
         bool deepScan,
         CancellationToken cancellationToken)
     {
@@ -77,8 +74,6 @@ public class PlexMovieLibraryScanner :
             new PlexConnectionParameters(connection, token),
             library,
             GetLocalPath,
-            ffmpegPath,
-            ffprobePath,
             deepScan,
             cancellationToken);
     }
@@ -103,7 +98,8 @@ public class PlexMovieLibraryScanner :
             connectionParameters.Connection,
             connectionParameters.Token);
 
-    protected override async Task<Option<MovieMetadata>> GetFullMetadata(
+    // this shouldn't be called anymore
+    protected override Task<Option<MovieMetadata>> GetFullMetadata(
         PlexConnectionParameters connectionParameters,
         PlexLibrary library,
         MediaItemScanResult<PlexMovie> result,
@@ -112,21 +108,58 @@ public class PlexMovieLibraryScanner :
     {
         if (result.IsAdded || result.Item.Etag != incoming.Etag || deepScan)
         {
-            Either<BaseError, MovieMetadata> maybeMetadata = await _plexServerApiClient.GetMovieMetadata(
+            throw new NotSupportedException("This shouldn't happen anymore");
+        }
+
+        return Task.FromResult<Option<MovieMetadata>>(None);
+    }
+
+    // this shouldn't be called anymore
+    protected override async Task<Option<MediaVersion>> GetMediaServerStatistics(
+        PlexConnectionParameters connectionParameters,
+        PlexLibrary library,
+        MediaItemScanResult<PlexMovie> result,
+        PlexMovie incoming)
+    {
+        _logger.LogDebug("Refreshing {Attribute} for {Path}", "Plex Statistics", result.LocalPath);
+
+        Either<BaseError, MediaVersion> maybeVersion =
+            await _plexServerApiClient.GetMovieMetadataAndStatistics(
+                    library,
+                    incoming.Key.Split("/").Last(),
+                    connectionParameters.Connection,
+                    connectionParameters.Token)
+                .MapT(tuple => tuple.Item2); // drop the metadata part
+
+        foreach (BaseError error in maybeVersion.LeftToSeq())
+        {
+            _logger.LogWarning("Failed to get movie statistics from Plex: {Error}", error.ToString());
+        }
+
+        return maybeVersion.ToOption();
+    }
+
+    protected override async Task<Option<Tuple<MovieMetadata, MediaVersion>>> GetFullMetadataAndStatistics(
+        PlexConnectionParameters connectionParameters,
+        PlexLibrary library,
+        MediaItemScanResult<PlexMovie> result,
+        PlexMovie incoming)
+    {
+        _logger.LogDebug("Refreshing {Attribute} for {Path}", "Plex Metadata and Statistics", result.LocalPath);
+
+        Either<BaseError, Tuple<MovieMetadata, MediaVersion>> maybeResult =
+            await _plexServerApiClient.GetMovieMetadataAndStatistics(
                 library,
                 incoming.Key.Split("/").Last(),
                 connectionParameters.Connection,
                 connectionParameters.Token);
 
-            foreach (BaseError error in maybeMetadata.LeftToSeq())
-            {
-                _logger.LogWarning("Failed to get movie metadata from Plex: {Error}", error.ToString());
-            }
-
-            return maybeMetadata.ToOption();
+        foreach (BaseError error in maybeResult.LeftToSeq())
+        {
+            _logger.LogWarning("Failed to get movie metadata and statistics from Plex: {Error}", error.ToString());
         }
 
-        return None;
+        return maybeResult.ToOption();
     }
 
     protected override async Task<Either<BaseError, MediaItemScanResult<PlexMovie>>> UpdateMetadata(
@@ -135,11 +168,6 @@ public class PlexMovieLibraryScanner :
     {
         PlexMovie existing = result.Item;
         MovieMetadata existingMetadata = existing.MovieMetadata.Head();
-
-        _logger.LogDebug(
-            "Refreshing {Attribute} for {Title}",
-            "Plex Metadata",
-            existingMetadata.Title);
 
         if (existingMetadata.MetadataKind != MetadataKind.External)
         {
@@ -308,6 +336,11 @@ public class PlexMovieLibraryScanner :
             {
                 result.IsUpdated = true;
             }
+        }
+
+        if (await _metadataRepository.UpdateSubtitles(existingMetadata, fullMetadata.Subtitles))
+        {
+            result.IsUpdated = true;
         }
 
         if (fullMetadata.SortTitle != existingMetadata.SortTitle)

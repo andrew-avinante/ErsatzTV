@@ -15,11 +15,11 @@ public class VaapiHardwareCapabilities : IHardwareCapabilities
         _logger = logger;
     }
 
-    public bool CanDecode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
+    public FFmpegCapability CanDecode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
     {
         int bitDepth = maybePixelFormat.Map(pf => pf.BitDepth).IfNone(8);
 
-        bool result = (videoFormat, videoProfile.IfNone(string.Empty).ToLowerInvariant()) switch
+        bool isHardware = (videoFormat, videoProfile.IfNone(string.Empty).ToLowerInvariant()) switch
         {
             // no hardware decoding of 10-bit h264
             (VideoFormat.H264, _) when bitDepth == 10 => false,
@@ -70,47 +70,79 @@ public class VaapiHardwareCapabilities : IHardwareCapabilities
             (VideoFormat.Hevc, "main 10" or "2") =>
                 _profileEntrypoints.Contains(
                     new VaapiProfileEntrypoint(VaapiProfile.HevcMain10, VaapiEntrypoint.Decode)),
+            
+            (VideoFormat.Vp9, "profile 0" or "0") =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Vp9Profile0, VaapiEntrypoint.Decode)),
+
+            (VideoFormat.Vp9, "profile 1" or "1") =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Vp9Profile1, VaapiEntrypoint.Decode)),
+
+            (VideoFormat.Vp9, "profile 2" or "2") =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Vp9Profile2, VaapiEntrypoint.Decode)),
+            
+            (VideoFormat.Vp9, "profile 3" or "3") =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Vp9Profile3, VaapiEntrypoint.Decode)),
+            
+            (VideoFormat.Av1, "main" or "0") =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Av1Profile0, VaapiEntrypoint.Decode)),
 
             // fall back to software decoder
             _ => false
         };
 
-        if (!result)
+        if (!isHardware)
         {
             _logger.LogDebug(
                 "VAAPI does not support decoding {Format}/{Profile}, will use software decoder",
                 videoFormat,
                 videoProfile);
         }
-        
-        return result;
+
+        return isHardware ? FFmpegCapability.Hardware : FFmpegCapability.Software;
     }
 
-    public bool CanEncode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
+    public FFmpegCapability CanEncode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
     {
         int bitDepth = maybePixelFormat.Map(pf => pf.BitDepth).IfNone(8);
 
-        bool result = videoFormat switch
+        bool isHardware = videoFormat switch
         {
             // vaapi cannot encode 10-bit h264
             VideoFormat.H264 when bitDepth == 10 => false,
             
             VideoFormat.H264 =>
                 _profileEntrypoints.Contains(
-                    new VaapiProfileEntrypoint(VaapiProfile.H264Main, VaapiEntrypoint.Encode)),
+                    new VaapiProfileEntrypoint(VaapiProfile.H264Main, VaapiEntrypoint.Encode)) ||
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.H264Main, VaapiEntrypoint.EncodeLowPower)),
 
             VideoFormat.Hevc when bitDepth == 10 =>
                 _profileEntrypoints.Contains(
-                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain10, VaapiEntrypoint.Encode)),
+                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain10, VaapiEntrypoint.Encode)) ||
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain10, VaapiEntrypoint.EncodeLowPower)),
 
             VideoFormat.Hevc =>
                 _profileEntrypoints.Contains(
-                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain, VaapiEntrypoint.Encode)),
+                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain, VaapiEntrypoint.Encode)) ||
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.HevcMain, VaapiEntrypoint.EncodeLowPower)),
 
+            VideoFormat.Mpeg2Video =>
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Mpeg2Main, VaapiEntrypoint.Encode)) ||
+                _profileEntrypoints.Contains(
+                    new VaapiProfileEntrypoint(VaapiProfile.Mpeg2Main, VaapiEntrypoint.EncodeLowPower)),
+            
             _ => false
         };
         
-        if (!result)
+        if (!isHardware)
         {
             _logger.LogDebug(
                 "VAAPI does not support encoding {Format} with bit depth {BitDepth}, will use software encoder",
@@ -118,6 +150,6 @@ public class VaapiHardwareCapabilities : IHardwareCapabilities
                 bitDepth);
         }
 
-        return result;
+        return isHardware ? FFmpegCapability.Hardware : FFmpegCapability.Software;
     }
 }

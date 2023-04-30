@@ -34,6 +34,7 @@ using ErsatzTV.Core.Trakt;
 using ErsatzTV.FFmpeg.Capabilities;
 using ErsatzTV.FFmpeg.Pipeline;
 using ErsatzTV.FFmpeg.Runtime;
+using ErsatzTV.Filters;
 using ErsatzTV.Formatters;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Data.Repositories;
@@ -58,12 +59,18 @@ using ErsatzTV.Services.RunOnce;
 using FluentValidation;
 using FluentValidation.AspNetCore;
 using Ganss.Xss;
-using MediatR;
 using MediatR.Courier.DependencyInjection;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Primitives;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.IO;
 using MudBlazor.Services;
 using Newtonsoft.Json;
@@ -118,6 +125,125 @@ public class Startup
 #endif
             });
 
+        OidcHelper.Init(Configuration);
+        JwtHelper.Init(Configuration);
+
+        if (OidcHelper.IsEnabled)
+        {
+            services.AddAuthentication(
+                    options =>
+                    {
+                        options.DefaultScheme = "cookie";
+                        options.DefaultChallengeScheme = "oidc";
+                    })
+                .AddCookie(
+                    "cookie",
+                    options =>
+                    {
+                        options.CookieManager = new ChunkingCookieManager();
+
+                        options.Cookie.HttpOnly = true;
+                        options.Cookie.SameSite = SameSiteMode.None;
+                        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                    })
+                .AddOpenIdConnect(
+                    "oidc",
+                    options =>
+                    {
+                        options.Authority = OidcHelper.Authority;
+                        options.ClientId = OidcHelper.ClientId;
+                        options.ClientSecret = OidcHelper.ClientSecret;
+
+                        options.ResponseType = OpenIdConnectResponseType.Code;
+                        options.UsePkce = true;
+                        options.ResponseMode = OpenIdConnectResponseMode.Query;
+
+                        options.Scope.Clear();
+                        options.Scope.Add("openid");
+
+                        options.CallbackPath = new PathString("/callback");
+
+                        options.SaveTokens = true;
+
+                        options.NonceCookie.SecurePolicy = CookieSecurePolicy.Always;
+                        options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.Always;
+
+                        if (!string.IsNullOrWhiteSpace(OidcHelper.LogoutUri))
+                        {
+                            options.Events = new OpenIdConnectEvents
+                            {
+                                OnRedirectToIdentityProviderForSignOut = context =>
+                                {
+                                    context.Response.Redirect(OidcHelper.LogoutUri);
+                                    context.HandleResponse();
+
+                                    return Task.CompletedTask;
+                                }
+                            };
+                        }
+                    });
+        }
+
+        if (JwtHelper.IsEnabled)
+        {
+            services.AddAuthentication().AddJwtBearer(
+                "jwt",
+                options =>
+                {
+                    options.TokenValidationParameters = new TokenValidationParameters
+                    {
+                        ValidateIssuer = false,
+                        ValidateAudience = false,
+                        ValidateIssuerSigningKey = true,
+                        IssuerSigningKey = JwtHelper.IssuerSigningKey,
+                        ValidateLifetime = true
+                    };
+                    options.Events = new JwtBearerEvents
+                    {
+                        OnMessageReceived = static context =>
+                        {
+                            StringValues token = context.Request.Query["access_token"];
+                            if (!string.IsNullOrWhiteSpace(token))
+                            {
+                                context.Token = token;
+                            }
+
+                            return Task.CompletedTask;
+                        }
+                    };
+                });
+        }
+
+        if (OidcHelper.IsEnabled || JwtHelper.IsEnabled)
+        {
+            services.AddAuthorization(
+                options =>
+                {
+                    if (OidcHelper.IsEnabled)
+                    {
+                        var defaultAuthorizationPolicyBuilder = new AuthorizationPolicyBuilder(
+                            "cookie",
+                            "oidc");
+
+                        defaultAuthorizationPolicyBuilder =
+                            defaultAuthorizationPolicyBuilder.RequireAuthenticatedUser();
+
+                        options.DefaultPolicy = defaultAuthorizationPolicyBuilder.Build();
+                    }
+
+                    if (JwtHelper.IsEnabled)
+                    {
+                        var onlyJwtSchemePolicyBuilder = new AuthorizationPolicyBuilder("jwt");
+                        options.AddPolicy(
+                            "JwtOnlyScheme",
+                            onlyJwtSchemePolicyBuilder
+                                .RequireAuthenticatedUser()
+                                .Build());
+                    }
+                }
+            );
+        }
+
         services.AddCors(
             o => o.AddPolicy(
                 "AllowAll",
@@ -146,17 +272,28 @@ public class Startup
                     opt.SerializerSettings.Converters.Add(new StringEnumConverter());
                 });
 
+        services.AddScoped(_ => new ConditionalIptvAuthorizeFilter("JwtOnlyScheme"));
+
         services.AddFluentValidationAutoValidation();
         services.AddValidatorsFromAssemblyContaining<Startup>();
 
-        if (!CurrentEnvironment.IsDevelopment())
+        string v2 = Environment.GetEnvironmentVariable("ETV_UI_V2");
+        if (!CurrentEnvironment.IsDevelopment() && !string.IsNullOrWhiteSpace(v2))
         {
             services.AddSpaStaticFiles(options => options.RootPath = "wwwroot/v2");
         }
 
         services.AddMemoryCache();
 
-        services.AddRazorPages();
+        services.AddRazorPages(
+            options =>
+            {
+                if (OidcHelper.IsEnabled)
+                {
+                    options.Conventions.AuthorizeFolder("/");
+                }
+            });
+
         services.AddServerSideBlazor();
 
         services.AddMudServices();
@@ -259,7 +396,7 @@ public class Startup
         SqlMapper.AddTypeHandler(new GuidHandler());
         SqlMapper.AddTypeHandler(new TimeSpanHandler());
 
-        services.AddMediatR(typeof(GetAllChannels).Assembly);
+        services.AddMediatR(config => config.RegisterServicesFromAssemblyContaining<GetAllChannels>());
 
         services.AddRefitClient<IPlexTvApi>()
             .ConfigureHttpClient(c => c.BaseAddress = new Uri("https://plex.tv/api/v2"));
@@ -318,7 +455,14 @@ public class Startup
 
         app.UseRouting();
 
-        if (!env.IsDevelopment())
+        if (OidcHelper.IsEnabled)
+        {
+            app.UseAuthentication();
+            app.UseAuthorization();
+        }
+
+        string v2 = Environment.GetEnvironmentVariable("ETV_UI_V2");
+        if (!env.IsDevelopment() && !string.IsNullOrWhiteSpace(v2))
         {
             app.Map(
                 "/v2",
@@ -330,6 +474,13 @@ public class Startup
                     }
 
                     app2.UseRouting();
+
+                    if (OidcHelper.IsEnabled)
+                    {
+                        app.UseAuthentication();
+                        app.UseAuthorization();
+                    }
+                    
                     app2.UseEndpoints(e => e.MapFallbackToFile("index.html"));
                     app2.UseFileServer(
                         new FileServerOptions
@@ -376,6 +527,7 @@ public class Startup
         AddChannel<IEmbyBackgroundServiceRequest>(services);
         AddChannel<IFFmpegWorkerRequest>(services);
         AddChannel<ISearchIndexBackgroundServiceRequest>(services);
+        AddChannel<IScannerBackgroundServiceRequest>(services);
 
         services.AddScoped<IFFmpegVersionHealthCheck, FFmpegVersionHealthCheck>();
         services.AddScoped<IFFmpegReportsHealthCheck, FFmpegReportsHealthCheck>();
@@ -469,6 +621,7 @@ public class Startup
         services.AddHostedService<EmbyService>();
         services.AddHostedService<JellyfinService>();
         services.AddHostedService<PlexService>();
+        services.AddHostedService<ScannerService>();
 #endif
         services.AddHostedService<FFmpegLocatorService>();
         services.AddHostedService<WorkerService>();

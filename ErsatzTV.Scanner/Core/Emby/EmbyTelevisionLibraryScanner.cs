@@ -6,7 +6,6 @@ using ErsatzTV.Core.Interfaces.Emby;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
-using ErsatzTV.Scanner.Core.Interfaces.Metadata;
 using ErsatzTV.Scanner.Core.Metadata;
 using Microsoft.Extensions.Logging;
 
@@ -19,6 +18,7 @@ public class EmbyTelevisionLibraryScanner : MediaServerTelevisionLibraryScanner<
     private readonly IEmbyApiClient _embyApiClient;
     private readonly IMediaSourceRepository _mediaSourceRepository;
     private readonly IEmbyPathReplacementService _pathReplacementService;
+    private readonly ILogger<EmbyTelevisionLibraryScanner> _logger;
     private readonly IEmbyTelevisionRepository _televisionRepository;
 
     public EmbyTelevisionLibraryScanner(
@@ -27,14 +27,12 @@ public class EmbyTelevisionLibraryScanner : MediaServerTelevisionLibraryScanner<
         IEmbyTelevisionRepository televisionRepository,
         IEmbyPathReplacementService pathReplacementService,
         ILocalFileSystem localFileSystem,
-        ILocalStatisticsProvider localStatisticsProvider,
-        ILocalSubtitlesProvider localSubtitlesProvider,
+        IMetadataRepository metadataRepository,
         IMediator mediator,
         ILogger<EmbyTelevisionLibraryScanner> logger)
         : base(
-            localStatisticsProvider,
-            localSubtitlesProvider,
             localFileSystem,
+            metadataRepository,
             mediator,
             logger)
     {
@@ -42,14 +40,16 @@ public class EmbyTelevisionLibraryScanner : MediaServerTelevisionLibraryScanner<
         _mediaSourceRepository = mediaSourceRepository;
         _televisionRepository = televisionRepository;
         _pathReplacementService = pathReplacementService;
+        _logger = logger;
     }
+
+    protected override bool ServerSupportsRemoteStreaming => true;
 
     public async Task<Either<BaseError, Unit>> ScanLibrary(
         string address,
         string apiKey,
         EmbyLibrary library,
-        string ffmpegPath,
-        string ffprobePath,
+        bool deepScan,
         CancellationToken cancellationToken)
     {
         List<EmbyPathReplacement> pathReplacements =
@@ -68,9 +68,7 @@ public class EmbyTelevisionLibraryScanner : MediaServerTelevisionLibraryScanner<
             new EmbyConnectionParameters(address, apiKey),
             library,
             GetLocalPath,
-            ffmpegPath,
-            ffprobePath,
-            false,
+            deepScan,
             cancellationToken);
     }
 
@@ -161,6 +159,43 @@ public class EmbyTelevisionLibraryScanner : MediaServerTelevisionLibraryScanner<
         EmbyEpisode incoming,
         bool deepScan) =>
         Task.FromResult(Option<EpisodeMetadata>.None);
+
+    protected override Task<Option<Tuple<EpisodeMetadata, MediaVersion>>> GetFullMetadataAndStatistics(
+        EmbyConnectionParameters connectionParameters,
+        EmbyLibrary library,
+        MediaItemScanResult<EmbyEpisode> result,
+        EmbyEpisode incoming) => Task.FromResult(Option<Tuple<EpisodeMetadata, MediaVersion>>.None);
+    
+    protected override async Task<Option<MediaVersion>> GetMediaServerStatistics(
+        EmbyConnectionParameters connectionParameters,
+        EmbyLibrary library,
+        MediaItemScanResult<EmbyEpisode> result,
+        EmbyEpisode incoming)
+    {
+        _logger.LogDebug("Refreshing {Attribute} for {Path}", "Emby Statistics", result.LocalPath);
+
+        Either<BaseError, MediaVersion> maybeVersion =
+            await _embyApiClient.GetPlaybackInfo(
+                connectionParameters.Address,
+                connectionParameters.ApiKey,
+                library,
+                incoming.ItemId);
+
+        foreach (BaseError error in maybeVersion.LeftToSeq())
+        {
+            _logger.LogWarning("Failed to get episode statistics from Emby: {Error}", error.ToString());
+        }
+
+        // chapters are pulled with metadata, not with statistics, but we need to save them here
+        foreach (MediaVersion version in maybeVersion.RightToSeq())
+        {
+            version.Chapters = result.Item.GetHeadVersion().Chapters;
+        }
+
+        return maybeVersion.ToOption();
+    }
+
+
 
     protected override Task<Either<BaseError, MediaItemScanResult<EmbyShow>>> UpdateMetadata(
         MediaItemScanResult<EmbyShow> result,

@@ -1,11 +1,172 @@
-﻿ Changelog
+﻿# Changelog
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Added
+- Add `Season, Episode` playback order
+  - This is currently *only* available when a show is added directly to a schedule
+  - This will ignore release date and sort exclusively by season number and then by episode number
+- Add `Show Media Info` button to movie and episode detail pages for troubleshooting
+
+### Fixed
+- Limit `HLS Direct` streams to realtime speed
+- Fix `Reset Playout` button to use worker thread instead of UI thread
+  - This fixes potential UI hangs and database concurrency bugs
+- Maintain watermark alpha channel (built-in transparency) using QSV acceleration
+- Properly extract and burn in embedded text subtitles using Jellyfin, Emby and Plex libraries
+- Fix bug where deleting a channel would not remove its data from XMLTV
+- Fix colorspace filter for some files with invalid color metadata
+- Fix playback of external subtitles on Windows
+- Fix vobsub subtitle burn in from media server libraries
+
+### Changed
+- Remove duplicate items from smart collections before scheduling
+  - i.e. shows no longer need to be filtered out if search results also include episodes
+  - Certain multi-collection scenarios may still include duplicates across multiple collections
+- Use autocomplete fields for collection searching in schedule items editor
+  - This greatly improves the editor performance
+- Ignore dot underscore files
+
+## [0.7.7-beta] - 2023-04-07
+### Added
+- Use `plot` field from Other Video NFO metadata as XMLTV description
+- Add detailed warning log when a file is added to ErsatzTV more than once
+
+### Fixed
+- Fix updating (re-adding) Trakt lists to properly use new metadata ids that were not present when originally added
+- Fix local show library scanning with non-english season folder names, e.g. `Staffel 02`
+- Fix bug where local libraries would merge with media server libraries when the same file was added to both libraries
+- Fix transcoding some 10-bit content from media servers using VAAPI acceleration
+- Fix decoding of MPEG-4 Part 2 (e.g. DivX) content using NVIDIA acceleration
+- Fix color normalization from `bt470bg` to `bt709` using QSV acceleration
+- Fix adding files to search index with unknown video codec
+- Fix subtitle burn-in (embedded or external) using Jellyfin, Emby and Plex libraries
+    - **This requires a one-time full library scan, which may take a long time with large libraries.**
+
+### Changed
+- Use Poster artwork for XMLTV if available
+  - If Poster artwork is unavailable, use Thumbnail
+- Improve XMLTV response time by caching data as playouts are updated 
+
+## [0.7.6-beta] - 2023-03-24
+### Added
+- Add `Troubleshooting` page with aggregated settings/hardware accel info for easy reference
+- Read `director` fields from music video NFO metadata
+- Pass `directors` and `studios` to music video credit templates
+- Add optional JSON Web Token (JWT) query string auth for streaming endpoints (everything under `/iptv`)
+  - This can be configured using the following env var (note the double underscore separator `__`)
+    - `JWT__ISSUERSIGNINGKEY`
+  - When configured, a JWT signed with the configured signing key is required to be passed in the query string as `access_token`, for example:
+    - `http://localhost:8409/iptv/channels.m3u?access_token=ABCDEF`
+    - `http://localhost:8409/iptv/xmltv.xml?access_token=ABCDEF`
+  - When channels are retrieved this way, the access token will automatically be passed through to all necessary urls
+  - Note that ONLY the `/iptv` endpoints will require auth when JWT is configured
+
+### Fixed
+- Fix scaling anamorphic content from non-local libraries
+- Fix direct streaming content from Jellyfin that has external subtitles
+  - Note that these subtitles are not currently supported in ETV, but they did cause a playback issue
+- Fix Jellyfin, Emby and Plex library scans that wouldn't work in certain timezones
+- Fix song normalization to match FFmpeg Profile bit depth
+- Fix bug playing some external subtitle files (e.g. with an apostrophe in the file name)
+- Fix bug detecting VAAPI capabilities when no device is selected in active FFmpeg Profile
+- Fix playout mode duration bugs in XMLTV
+  - Tail mode filler will properly include filler duration in XMLTV
+  - Duration that wraps across midnight will no longer have overlapping items in XMLTV
+- Maintain collection progress across all alternate schedules on a playout
+- Fix color normalization from `bt470bg` to `bt709`
+
+### Changed
+- Ignore case of video and audio file extensions in local folder scanner
+  - For example, the scanner will now find `movie.MKV` as well as `movie.mkv` on case-sensitive filesystems
+- Include multiple `display-name` entries in generated XMLTV
+  - Plex should now display the channel number instead of the channel id (e.g. `1.2` instead of `1.2.etv`)
+- Rework concurrency a bit
+  - Playout builds are no longer blocked by library scans
+  - Adding Trakt lists is no longer blocked by library scans
+  - All library scans (local and media servers) run sequentially
+- Emby collection scanning will no longer happen after every (automatic or forced) library scan
+  - Automatic/periodic scans will check collections one time after all libraries have been scanned
+  - There is a new table in the `Media` > `Libraries` page with a button to manually re-scan Emby collections as needed
+- For performance reasons, limit console log output to errors on Windows
+  - Other platforms are unchanged
+  - Log file behavior is unchanged
+
+## [0.7.5-beta] - 2023-03-05
+### Added
+- Use AV1 hardware-accelerated decoder with VAAPI, QSV, NVIDIA when available
+- Use VP9 hardware-accelerated decoder with VAAPI when available
+
+### Fixed
+- Align default docker image (no acceleration) with new images from [ErsatzTV-ffmpeg](https://github.com/jasongdove/ErsatzTV-ffmpeg)
+- Fix some transcoding pipelines that use software decoders
+- Improve VAAPI encoder capability detection on newer hardware
+- Fix trash page to properly display episodes with missing metadata or titles
+- Fix playback of content with yuv444p10le pixel format
+- Fix case where some multi-episode files from Plex would crash the scanner
+
+### Changed
+- Upgrade all docker images and windows builds to ffmpeg 6.0
+- Plex, Jellyfin and Emby libraries now retrieve all metadata and statistics from the media server
+  - File systems will no longer be periodically scanned for libraries using these media sources
+- Plex, Jellyfin and Emby libraries now direct stream content when files are not found on ErsatzTV's file system
+  - Content will still be normalized according to the Channel and FFmpeg Profile settings
+  - Streaming from disk is preferred, so every playback attempt will first check the local file system
+- Use libvpl instead of libmfx to provide intel acceleration in vaapi docker images
+- Search queries no longer remove duplicate results as this was causing incorrect behavior
+- Prioritize audio streams that are flagged as "default" over number of audio channels
+    - For example, a video with a stereo commentary track and a mono "default" track will now prefer the "default" track
+- Support many more season folder names with local television libraries
+
+## [0.7.4-beta] - 2023-02-12
+### Added
+- Add button to copy/clone schedule from schedules table
+- Synchronize episode tags and genres from Jellyfin, Emby and Local show libraries
+- Add `Deep Scan` button to Jellyfin and Emby libraries
+  - This is now required to update some metadata for existing libraries, when targeted updates are not possible
+  - For example, if you already have tags and genres on your episodes in Jellyfin or Emby, you will need to deep scan each library to update that metadata on existing items in ErsatzTV
+
+### Fixed
+- Fix many QSV pipeline bugs
+- Fix MPEG2 video format with QSV and VAAPI acceleration
+- Fix playback of content with undefined colorspace
+- Fix NVIDIA color normalization with VP9 sources
+- Fix fallback filler looping
+- Fix bug where some libraries would never scan
+- Fix filler ordering so post-roll is properly scheduled after padded mid-roll
+- Fix pre/post-roll filler padding when used with mid-roll
+  - This caused overlapping schedule items, fallback filler that was too long, etc.
+
+### Changed
+- Merge generated `Other Video` folder tags with tags from sidecar NFO
+- Prioritize audio streams that are flagged as "default" when multiple candidate streams are available
+  - For example, a video with a stereo commentary track and a stereo "default" track will now prefer the "default" track 
+
+## [0.7.3-beta] - 2023-01-25
+### Added
 - Attempt to release memory periodically
+- Add OpenID Connect (OIDC) support (e.g. Keycloak, Authelia, Auth0)
+  - This only protects the management UI; all streaming endpoints will continue to allow anonymous access 
+  - This can be configured with the following env vars (note the double underscore separator `__`)
+    - `OIDC__AUTHORITY`
+    - `OIDC__CLIENTID`
+    - `OIDC__CLIENTSECRET`
+    - `OIDC__LOGOUTURI` (optional, needed for Auth0, use `https://{auth0-domain}/v2/logout?client_id={auth0-client-id}` with proper values for domain and client-id)
+- Add *experimental* alternate schedule system
+  - This allows a single playout to dynamically select a schedule based on date criteria, for example:
+    - Weekday vs weekend schedules
+    - Summer vs fall schedules
+    - Shark week schedules
+  - Alternate schedules can be managed by clicking the calendar icon in the playout list
+  - Playouts contain a prioritized (top to bottom) list of alternate schedules
+  - Whenever a playout is built for a given day, ErsatzTV will check for a matching schedule from top to bottom
+  - A given day must match all alternate schedule parameters; wildcards (`*any*`) will always match
+    - Day of week
+    - Day of month
+    - Month
+  - The lowest priority (bottom) item will always match all parameters, and can be considered a "default" or "fallback" schedule 
 
 ### Fixed
 - Fix schedule editor crashing due to bad music video artist data
@@ -18,6 +179,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - This ensures errors will display even when hardware acceleration is misconfigured
 - Call scanner process only when scanning is required based on library refresh interval
 - Use lower process priority for scanner process with unforced (automatic) library scans
+- Disable V2 UI and APIs by default
+  - V2 UI can be re-enabled by setting the env var `ETV_UI_V2` to any value
 
 ## [0.7.2-beta] - 2023-01-05
 ### Fixed
@@ -1477,7 +1640,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Initial release to facilitate testing outside of Docker.
 
 
-[Unreleased]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.2-beta...HEAD
+[Unreleased]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.7-beta...HEAD
+[0.7.7-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.6-beta...v0.7.7-beta
+[0.7.6-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.5-beta...v0.7.6-beta
+[0.7.5-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.4-beta...v0.7.5-beta
+[0.7.4-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.3-beta...v0.7.4-beta
+[0.7.3-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.2-beta...v0.7.3-beta
 [0.7.2-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.1-beta...v0.7.2-beta
 [0.7.1-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.0-beta...v0.7.1-beta
 [0.7.0-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.6.9-beta...v0.7.0-beta

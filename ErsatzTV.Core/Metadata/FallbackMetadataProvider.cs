@@ -5,11 +5,42 @@ using ErsatzTV.Core.Interfaces.Metadata;
 
 namespace ErsatzTV.Core.Metadata;
 
-public class FallbackMetadataProvider : IFallbackMetadataProvider
+public partial class FallbackMetadataProvider : IFallbackMetadataProvider
 {
+    private static readonly Regex SeasonPattern = SeasonNumber();
     private readonly IClient _client;
 
     public FallbackMetadataProvider(IClient client) => _client = client;
+
+    public Option<int> GetSeasonNumberForFolder(string folder)
+    {
+        string folderName = Path.GetFileName(folder) ?? folder;
+        if (int.TryParse(folderName, out int seasonNumber))
+        {
+            return seasonNumber;
+        }
+        
+        Match match = SeasonPattern.Match(folderName);
+        if (match.Success && int.TryParse(match.Groups[1].Value, out seasonNumber))
+        {
+            return seasonNumber;
+        }
+
+        if (int.TryParse(folder.Split(" ").Last(), out seasonNumber))
+        {
+            return seasonNumber;
+        }
+        
+        if (folder.EndsWith("specials", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        return None;
+    }
+    
+    [GeneratedRegex(@"s(?:eason)?\s?(\d+)(?![e\d])", RegexOptions.IgnoreCase)]
+    private static partial Regex SeasonNumber();
 
     public ShowMetadata GetFallbackMetadataForShow(string showFolder)
     {
@@ -127,7 +158,7 @@ public class FallbackMetadataProvider : IFallbackMetadataProvider
 
     private List<EpisodeMetadata> GetEpisodeMetadata(string fileName, EpisodeMetadata baseMetadata)
     {
-        var result = new List<EpisodeMetadata>();
+        var result = new List<EpisodeMetadata> { baseMetadata };
 
         try
         {
@@ -141,38 +172,46 @@ public class FallbackMetadataProvider : IFallbackMetadataProvider
 
             if (matches.Count > 0)
             {
-                foreach (Match match in matches)
+                var episodeNumbers = matches.Bind(
+                        m => m.Groups[1].Value
+                            .Replace('e', '-')
+                            .Split('-')
+                            .Bind(ep => int.TryParse(ep, out int num) ? Some(num) : Option<int>.None))
+                    .ToList();
+
+                switch (episodeNumbers.Count)
                 {
-                    string[] split = match.Groups[1].Value.Replace('e', '-').Split('-');
-                    foreach (string ep in split)
-                    {
-                        if (!int.TryParse(ep, out int episodeNumber))
+                    case 0:
+                        break;
+                    case 1:
+                        baseMetadata.EpisodeNumber = episodeNumbers.Head();
+                        break;
+                    default:
+                        result.Clear();
+                        foreach (int episodeNumber in episodeNumbers)
                         {
-                            continue;
+                            var metadata = new EpisodeMetadata
+                            {
+                                MetadataKind = MetadataKind.Fallback,
+                                EpisodeNumber = episodeNumber,
+                                DateAdded = baseMetadata.DateAdded,
+                                DateUpdated = baseMetadata.DateAdded,
+                                Title = baseMetadata.Title,
+                                Actors = new List<Actor>(),
+                                Artwork = new List<Artwork>(),
+                                Directors = new List<Director>(),
+                                Genres = new List<Genre>(),
+                                Guids = new List<MetadataGuid>(),
+                                Studios = new List<Studio>(),
+                                Tags = new List<Tag>(),
+                                Writers = new List<Writer>()
+                            };
+
+                            result.Add(metadata);
                         }
 
-                        var metadata = new EpisodeMetadata
-                        {
-                            MetadataKind = MetadataKind.Fallback,
-                            EpisodeNumber = episodeNumber,
-                            DateAdded = baseMetadata.DateAdded,
-                            DateUpdated = baseMetadata.DateAdded,
-                            Title = baseMetadata.Title,
-                            Actors = new List<Actor>(),
-                            Artwork = new List<Artwork>(),
-                            Directors = new List<Director>(),
-                            Genres = new List<Genre>(),
-                            Guids = new List<MetadataGuid>(),
-                            Studios = new List<Studio>(),
-                            Tags = new List<Tag>(),
-                            Writers = new List<Writer>()
-                        };
-
-                        result.Add(metadata);
-                    }
+                        break;
                 }
-
-                return result;
             }
         }
         catch (Exception ex)

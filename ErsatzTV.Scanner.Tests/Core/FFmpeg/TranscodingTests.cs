@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Bugsnag;
 using CliWrap;
+using CliWrap.Buffered;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Domain.Filler;
@@ -20,7 +21,9 @@ using ErsatzTV.FFmpeg.Filter.Vaapi;
 using ErsatzTV.FFmpeg.Format;
 using ErsatzTV.FFmpeg.Pipeline;
 using ErsatzTV.FFmpeg.State;
+using ErsatzTV.Infrastructure.Images;
 using ErsatzTV.Infrastructure.Runtime;
+using ErsatzTV.Scanner.Core.Interfaces.Metadata;
 using ErsatzTV.Scanner.Core.Metadata;
 using FluentAssertions;
 using Microsoft.Extensions.Caching.Memory;
@@ -49,6 +52,11 @@ public class TranscodingTests
         LoggerFactory = new LoggerFactory().AddSerilog(Log.Logger);
 
         MemoryCache = new MemoryCache(new MemoryCacheOptions());
+
+        if (!Directory.Exists(FileSystemLayout.TempFilePoolFolder))
+        {
+            Directory.CreateDirectory(FileSystemLayout.TempFilePoolFolder);
+        }
     }
 
     [Test]
@@ -102,59 +110,60 @@ public class TranscodingTests
         public static Watermark[] Watermarks =
         {
             Watermark.None,
-            // Watermark.PermanentOpaqueScaled,
+            Watermark.PermanentOpaqueScaled,
             // Watermark.PermanentOpaqueActualSize,
-            // Watermark.PermanentTransparentScaled,
+            Watermark.PermanentTransparentScaled,
             // Watermark.PermanentTransparentActualSize
         };
 
         public static Subtitle[] Subtitles =
         {
             Subtitle.None,
-            // Subtitle.Picture,
-            // Subtitle.Text
+            Subtitle.Picture,
+            Subtitle.Text
         };
 
         public static Padding[] Paddings =
         {
             Padding.NoPadding,
-            // Padding.WithPadding
+            Padding.WithPadding
         };
 
         public static VideoScanKind[] VideoScanKinds =
         {
             VideoScanKind.Progressive,
-            // VideoScanKind.Interlaced
+            VideoScanKind.Interlaced
         };
 
         public static InputFormat[] InputFormats =
         {
-            // // example format that requires colorspace filter
-            // new("libx264", "yuv420p", "tv", "smpte170m", "bt709", "smpte170m"),
-            //
-            // // example format that requires setparams filter
-            // new("libx264", "yuv420p", string.Empty, string.Empty, string.Empty, string.Empty),
-            //
-            // // new("libx264", "yuvj420p"),
-            // new("libx264", "yuv420p10le"),
-            // // new("libx264", "yuv444p10le"),
-            //
-            // // new("mpeg1video", "yuv420p"),
+            // // // example format that requires colorspace filter
+            new("libx264", "yuv420p", "tv", "smpte170m", "bt709", "smpte170m"),
             // //
-            // // new("mpeg2video", "yuv420p"),
-            //
+            // // // example format that requires setparams filter
+            new("libx264", "yuv420p", string.Empty, string.Empty, string.Empty, string.Empty),
+            // //
+            // // // new("libx264", "yuvj420p"),
+            new("libx264", "yuv420p10le"),
+            // // // new("libx264", "yuv444p10le"),
+            // //
+            // // // new("mpeg1video", "yuv420p"),
+            // // //
+            new("mpeg2video", "yuv420p"),
+            // //
             new("libx265", "yuv420p"),
-            // new("libx265", "yuv420p10le"),
+            new("libx265", "yuv420p10le"),
             //
-            // // new("mpeg4", "yuv420p"),
-            // //
-            // // new("libvpx-vp9", "yuv420p"),
-            // //
+            // new("mpeg4", "yuv420p"),
+            //
+            // new("libvpx-vp9", "yuv420p"),
+            // new("libvpx-vp9", "yuv420p10le"),
+            //
             // // // new("libaom-av1", "yuv420p")
             // // // av1    yuv420p10le    51
             // //
-            // // new("msmpeg4v2", "yuv420p"),
-            // // new("msmpeg4v3", "yuv420p")
+            // new("msmpeg4v2", "yuv420p"),
+            new("msmpeg4v3", "yuv420p")
             //
             // // wmv3    yuv420p    1
         };
@@ -162,27 +171,28 @@ public class TranscodingTests
         public static Resolution[] Resolutions =
         {
             new() { Width = 1920, Height = 1080 },
-            // new() { Width = 1280, Height = 720 }
+            new() { Width = 1280, Height = 720 }
         };
 
         public static FFmpegProfileBitDepth[] BitDepths =
         {
             FFmpegProfileBitDepth.EightBit,
-            // FFmpegProfileBitDepth.TenBit
+            FFmpegProfileBitDepth.TenBit
         };
 
         public static FFmpegProfileVideoFormat[] VideoFormats =
         {
             FFmpegProfileVideoFormat.H264,
-            // FFmpegProfileVideoFormat.Hevc
+            FFmpegProfileVideoFormat.Hevc,
+            // FFmpegProfileVideoFormat.Mpeg2Video
         };
 
         public static HardwareAccelerationKind[] TestAccelerations =
         {
             // HardwareAccelerationKind.None,
-            HardwareAccelerationKind.Nvenc,
-            // HardwareAccelerationKind.Vaapi,
-            // HardwareAccelerationKind.Qsv,
+            // HardwareAccelerationKind.Nvenc,
+            HardwareAccelerationKind.Vaapi,
+            HardwareAccelerationKind.Qsv,
             // HardwareAccelerationKind.VideoToolbox,
             // HardwareAccelerationKind.Amf
         };
@@ -190,6 +200,178 @@ public class TranscodingTests
         public static string[] FilesToTest => new[] { string.Empty };
     }
 
+    [Test]
+    [Combinatorial]
+    public async Task TranscodeSong(
+        [ValueSource(typeof(TestData), nameof(TestData.Watermarks))]
+        Watermark watermark,
+        [ValueSource(typeof(TestData), nameof(TestData.Resolutions))]
+        Resolution profileResolution,
+        [ValueSource(typeof(TestData), nameof(TestData.BitDepths))]
+        FFmpegProfileBitDepth profileBitDepth,
+        [ValueSource(typeof(TestData), nameof(TestData.VideoFormats))]
+        FFmpegProfileVideoFormat profileVideoFormat,
+        [ValueSource(typeof(TestData), nameof(TestData.TestAccelerations))]
+        HardwareAccelerationKind profileAcceleration)
+    {
+        var localFileSystem = new LocalFileSystem(new Mock<IClient>().Object, LoggerFactory.CreateLogger<LocalFileSystem>());
+        var tempFilePool = new TempFilePool();
+        
+        var mockImageCache = new Mock<ImageCache>(localFileSystem, tempFilePool);
+
+        // always return the static watermark resource
+        mockImageCache.Setup(
+                ic => ic.GetPathForImage(
+                    It.IsAny<string>(),
+                    It.Is<ArtworkKind>(x => x == ArtworkKind.Watermark),
+                    It.IsAny<Option<int>>()))
+            .Returns(Path.Combine(TestContext.CurrentContext.TestDirectory, "Resources", "ErsatzTV.png"));
+        
+        var oldService = new FFmpegProcessService(
+            new FFmpegPlaybackSettingsCalculator(),
+            new FakeStreamSelector(),
+            mockImageCache.Object,
+            tempFilePool,
+            new Mock<IClient>().Object,
+            MemoryCache,
+            LoggerFactory.CreateLogger<FFmpegProcessService>());
+
+        var service = new FFmpegLibraryProcessService(
+            oldService,
+            new FFmpegPlaybackSettingsCalculator(),
+            new FakeStreamSelector(),
+            tempFilePool,
+            new PipelineBuilderFactory(
+                new RuntimeInfo(),
+                //new FakeNvidiaCapabilitiesFactory(),
+                new HardwareCapabilitiesFactory(
+                    MemoryCache,
+                    LoggerFactory.CreateLogger<HardwareCapabilitiesFactory>()),
+                LoggerFactory.CreateLogger<PipelineBuilderFactory>()),
+            LoggerFactory.CreateLogger<FFmpegLibraryProcessService>());
+        
+        var songVideoGenerator = new SongVideoGenerator(tempFilePool, mockImageCache.Object, service);
+
+        var channel = new Channel(Guid.NewGuid())
+        {
+            Number = "1",
+            FFmpegProfile = FFmpegProfile.New("test", profileResolution) with
+            {
+                HardwareAcceleration = profileAcceleration,
+                VideoFormat = profileVideoFormat,
+                AudioFormat = FFmpegProfileAudioFormat.Aac,
+                DeinterlaceVideo = true,
+                BitDepth = profileBitDepth
+            },
+            StreamingMode = StreamingMode.TransportStream,
+            SubtitleMode = ChannelSubtitleMode.None
+        };
+        
+        string file = Path.Combine(TestContext.CurrentContext.TestDirectory, Path.Combine("Resources", "song.mp3"));
+        var songVersion = new MediaVersion
+        {
+            MediaFiles = new List<MediaFile>
+            {
+                new() { Path = file }
+            },
+
+            Streams = new List<MediaStream>()
+        };
+
+        var song = new Song
+        {
+            SongMetadata = new List<SongMetadata>
+            {
+                new()
+                {
+                    Title = "Song Title",
+                    Artist = "Song Artist",
+                    Artwork = new List<Artwork>()
+                }
+            },
+            MediaVersions = new List<MediaVersion> { songVersion }
+        };
+        
+        (string videoPath, MediaVersion videoVersion) = await songVideoGenerator.GenerateSongVideo(
+            song,
+            channel,
+            None, // playout item watermark
+            None, // global watermark
+            ExecutableName("ffmpeg"),
+            ExecutableName("ffprobe"),
+            CancellationToken.None);
+        
+        var metadataRepository = new Mock<IMetadataRepository>();
+        metadataRepository
+            .Setup(r => r.UpdateStatistics(It.IsAny<MediaItem>(), It.IsAny<MediaVersion>(), It.IsAny<bool>()))
+            .Callback<MediaItem, MediaVersion, bool>(
+                (_, version, _) =>
+                {
+                    if (version.Streams.Any(s => s.MediaStreamKind == MediaStreamKind.Video && s.AttachedPic == false))
+                    {
+                        version.MediaFiles = videoVersion.MediaFiles;
+                        videoVersion = version;
+                    }
+                    else
+                    {
+                        version.MediaFiles = songVersion.MediaFiles;
+                        songVersion = version;
+                    }
+                });
+
+        var localStatisticsProvider = new LocalStatisticsProvider(
+            metadataRepository.Object,
+            new LocalFileSystem(new Mock<IClient>().Object, LoggerFactory.CreateLogger<LocalFileSystem>()),
+            new Mock<IClient>().Object,
+            LoggerFactory.CreateLogger<LocalStatisticsProvider>());
+        
+        await localStatisticsProvider.RefreshStatistics(ExecutableName("ffmpeg"), ExecutableName("ffprobe"), song);
+        
+        DateTimeOffset now = DateTimeOffset.Now;
+        
+        Command process = await service.ForPlayoutItem(
+            ExecutableName("ffmpeg"),
+            ExecutableName("ffprobe"),
+            false,
+            channel,
+            videoVersion,
+            new MediaItemAudioVersion(song, songVersion),
+            videoPath,
+            file,
+            _ => Task.FromResult(new List<ErsatzTV.Core.Domain.Subtitle>()),
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            ChannelSubtitleMode.None,
+            now,
+            now + TimeSpan.FromSeconds(3),
+            now,
+            Option<ChannelWatermark>.None,
+            GetWatermark(watermark),
+            VaapiDriver.Default,
+            "/dev/dri/renderD128",
+            Option<int>.None,
+            false,
+            FillerKind.None,
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(3),
+            0,
+            None,
+            false,
+            _ => { });
+
+        // Console.WriteLine($"ffmpeg arguments {process.Arguments}");
+
+        await TranscodeAndVerify(
+            process,
+            profileResolution,
+            profileBitDepth,
+            profileVideoFormat,
+            profileAcceleration,
+            localStatisticsProvider,
+            () => videoVersion);
+    }
+    
     [Test]
     [Combinatorial]
     public async Task Transcode(
@@ -216,11 +398,13 @@ public class TranscodingTests
         string file = fileToTest;
         if (string.IsNullOrWhiteSpace(file))
         {
-            if (inputFormat.Encoder is "mpeg1video" or "msmpeg4v2" or "msmpeg4v3")
+            // some formats don't support interlaced content (mpeg1video, msmpeg4v2, msmpeg4v3)
+            // others (libx265, any 10-bit) are unlikely to have interlaced content, so don't bother testing
+            if (inputFormat.Encoder is "mpeg1video" or "msmpeg4v2" or "msmpeg4v3" or "libx265" || inputFormat.PixelFormat.Contains("10"))
             {
                 if (videoScanKind == VideoScanKind.Interlaced)
                 {
-                    Assert.Inconclusive($"{inputFormat.Encoder} does not support interlaced content");
+                    Assert.Inconclusive($"{inputFormat.Encoder}/{inputFormat.PixelFormat} does not support interlaced content");
                     return;
                 }
             }
@@ -234,39 +418,6 @@ public class TranscodingTests
             }
         }
 
-        var imageCache = new Mock<IImageCache>();
-
-        // always return the static watermark resource
-        imageCache.Setup(
-                ic => ic.GetPathForImage(
-                    It.IsAny<string>(),
-                    It.Is<ArtworkKind>(x => x == ArtworkKind.Watermark),
-                    It.IsAny<Option<int>>()))
-            .Returns(Path.Combine(TestContext.CurrentContext.TestDirectory, "Resources", "ErsatzTV.png"));
-
-        var oldService = new FFmpegProcessService(
-            new FFmpegPlaybackSettingsCalculator(),
-            new FakeStreamSelector(),
-            imageCache.Object,
-            new Mock<ITempFilePool>().Object,
-            new Mock<IClient>().Object,
-            MemoryCache,
-            LoggerFactory.CreateLogger<FFmpegProcessService>());
-
-        var service = new FFmpegLibraryProcessService(
-            oldService,
-            new FFmpegPlaybackSettingsCalculator(),
-            new FakeStreamSelector(),
-            new Mock<ITempFilePool>().Object,
-            new PipelineBuilderFactory(
-                new RuntimeInfo(),
-                //new FakeNvidiaCapabilitiesFactory(),
-                new HardwareCapabilitiesFactory(
-                    MemoryCache,
-                    LoggerFactory.CreateLogger<HardwareCapabilitiesFactory>()),
-                LoggerFactory.CreateLogger<PipelineBuilderFactory>()),
-            LoggerFactory.CreateLogger<FFmpegLibraryProcessService>());
-
         var v = new MediaVersion
         {
             MediaFiles = new List<MediaFile>
@@ -278,7 +429,7 @@ public class TranscodingTests
 
         var metadataRepository = new Mock<IMetadataRepository>();
         metadataRepository
-            .Setup(r => r.UpdateLocalStatistics(It.IsAny<MediaItem>(), It.IsAny<MediaVersion>(), It.IsAny<bool>()))
+            .Setup(r => r.UpdateStatistics(It.IsAny<MediaItem>(), It.IsAny<MediaVersion>(), It.IsAny<bool>()))
             .Callback<MediaItem, MediaVersion, bool>(
                 (_, version, _) =>
                 {
@@ -344,72 +495,7 @@ public class TranscodingTests
 
         DateTimeOffset now = DateTimeOffset.Now;
 
-        Option<ChannelWatermark> channelWatermark = Option<ChannelWatermark>.None;
-        switch (watermark)
-        {
-            case Watermark.None:
-                break;
-            case Watermark.IntermittentOpaque:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Intermittent,
-                    // TODO: how do we make sure this actually appears
-                    FrequencyMinutes = 1,
-                    DurationSeconds = 2,
-                    Opacity = 100
-                };
-                break;
-            case Watermark.IntermittentTransparent:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Intermittent,
-                    // TODO: how do we make sure this actually appears
-                    FrequencyMinutes = 1,
-                    DurationSeconds = 2,
-                    Opacity = 80
-                };
-                break;
-            case Watermark.PermanentOpaqueScaled:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Permanent,
-                    Opacity = 100,
-                    Size = WatermarkSize.Scaled,
-                    WidthPercent = 15
-                };
-                break;
-            case Watermark.PermanentOpaqueActualSize:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Permanent,
-                    Opacity = 100,
-                    Size = WatermarkSize.ActualSize
-                };
-                break;
-            case Watermark.PermanentTransparentScaled:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Permanent,
-                    Opacity = 80,
-                    Size = WatermarkSize.Scaled,
-                    WidthPercent = 15
-                };
-                break;
-            case Watermark.PermanentTransparentActualSize:
-                channelWatermark = new ChannelWatermark
-                {
-                    ImageSource = ChannelWatermarkImageSource.Custom,
-                    Mode = ChannelWatermarkMode.Permanent,
-                    Opacity = 80,
-                    Size = WatermarkSize.ActualSize
-                };
-                break;
-        }
+        Option<ChannelWatermark> channelWatermark = GetWatermark(watermark);
 
         ChannelSubtitleMode subtitleMode = subtitle switch
         {
@@ -490,6 +576,8 @@ public class TranscodingTests
             hasWatermarkFilters.Should().Be(watermark != Watermark.None);
         }
 
+        FFmpegLibraryProcessService service = GetService();
+
         Command process = await service.ForPlayoutItem(
             ExecutableName("ffmpeg"),
             ExecutableName("ffprobe"),
@@ -518,7 +606,7 @@ public class TranscodingTests
             string.Empty,
             subtitleMode,
             now,
-            now + TimeSpan.FromSeconds(5),
+            now + TimeSpan.FromSeconds(3),
             now,
             Option<ChannelWatermark>.None,
             channelWatermark,
@@ -528,7 +616,7 @@ public class TranscodingTests
             false,
             FillerKind.None,
             TimeSpan.Zero,
-            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(3),
             0,
             None,
             false,
@@ -536,119 +624,79 @@ public class TranscodingTests
 
         // Console.WriteLine($"ffmpeg arguments {string.Join(" ", process.StartInfo.ArgumentList)}");
 
-        string[] unsupportedMessages =
+        await TranscodeAndVerify(
+            process,
+            profileResolution,
+            profileBitDepth,
+            profileVideoFormat,
+            profileAcceleration,
+            localStatisticsProvider,
+            () => v);
+    }
+
+    private Option<ChannelWatermark> GetWatermark(Watermark watermark)
+    {
+        switch (watermark)
         {
-            "No support for codec",
-            "No usable",
-            "Provided device doesn't support",
-            "Current pixel format is unsupported"
-        };
-
-        var sb = new StringBuilder();
-        var timeoutSignal = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        string tempFile = Path.GetTempFileName();
-        try
-        {
-            CommandResult result;
-
-            try
-            {
-                result = await process
-                    .WithStandardOutputPipe(PipeTarget.ToFile(tempFile))
-                    .WithStandardErrorPipe(PipeTarget.ToStringBuilder(sb))
-                    .ExecuteAsync(timeoutSignal.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                var arguments = string.Join(
-                    ' ',
-                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
-
-                Assert.Fail($"Transcode failure (timeout): ffmpeg {arguments}");
-                return;
-            }
-
-            var error = sb.ToString();
-            bool isUnsupported = unsupportedMessages.Any(error.Contains);
-
-            if (profileAcceleration != HardwareAccelerationKind.None && isUnsupported)
-            {
-                result.ExitCode.Should().Be(1, $"Error message with successful exit code? {process.Arguments}");
-                Assert.Warn($"Unsupported on this hardware: ffmpeg {process.Arguments}");
-            }
-            else if (error.Contains("Impossible to convert between"))
-            {
-                var arguments = string.Join(
-                    ' ',
-                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
-
-                Assert.Fail($"Transcode failure: ffmpeg {arguments}");
-            }
-            else
-            {
-                var arguments = string.Join(
-                    ' ',
-                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
-
-                result.ExitCode.Should().Be(0, error + Environment.NewLine + arguments);
-                if (result.ExitCode == 0)
+            case Watermark.None:
+                break;
+            case Watermark.IntermittentOpaque:
+                return new ChannelWatermark
                 {
-                    Console.WriteLine(process.Arguments);
-                }
-            }
-            
-            // additional checks on resulting file
-            await localStatisticsProvider.RefreshStatistics(
-                ExecutableName("ffmpeg"),
-                ExecutableName("ffprobe"),
-                new Movie
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Intermittent,
+                    // TODO: how do we make sure this actually appears
+                    FrequencyMinutes = 1,
+                    DurationSeconds = 2,
+                    Opacity = 100
+                };
+            case Watermark.IntermittentTransparent:
+                return new ChannelWatermark
                 {
-                    MediaVersions = new List<MediaVersion>
-                    {
-                        new()
-                        {
-                            MediaFiles = new List<MediaFile>
-                            {
-                                new() { Path = tempFile }
-                            }
-                        }
-                    }
-                });
-
-            // verify de-interlace
-            v.VideoScanKind.Should().NotBe(VideoScanKind.Interlaced);
-            
-            // verify resolution
-            v.Height.Should().Be(profileResolution.Height);
-            v.Width.Should().Be(profileResolution.Width);
-
-            foreach (MediaStream videoStream in v.Streams.Filter(s => s.MediaStreamKind == MediaStreamKind.Video))
-            {
-                // verify pixel format
-                videoStream.PixelFormat.Should().Be(
-                    profileBitDepth == FFmpegProfileBitDepth.TenBit ? PixelFormat.YUV420P10LE : PixelFormat.YUV420P);
-                
-                // verify colors
-                var colorParams = new ColorParams(
-                    videoStream.ColorRange,
-                    videoStream.ColorSpace,
-                    videoStream.ColorTransfer,
-                    videoStream.ColorPrimaries);
-
-                // AMF doesn't seem to set this metadata properly
-                if (profileAcceleration != HardwareAccelerationKind.Amf)
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Intermittent,
+                    // TODO: how do we make sure this actually appears
+                    FrequencyMinutes = 1,
+                    DurationSeconds = 2,
+                    Opacity = 80
+                };
+            case Watermark.PermanentOpaqueScaled:
+                return new ChannelWatermark
                 {
-                    colorParams.IsBt709.Should().BeTrue($"{colorParams}");
-                }
-            }
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Permanent,
+                    Opacity = 100,
+                    Size = WatermarkSize.Scaled,
+                    WidthPercent = 15
+                };
+            case Watermark.PermanentOpaqueActualSize:
+                return new ChannelWatermark
+                {
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Permanent,
+                    Opacity = 100,
+                    Size = WatermarkSize.ActualSize
+                };
+            case Watermark.PermanentTransparentScaled:
+                return new ChannelWatermark
+                {
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Permanent,
+                    Opacity = 80,
+                    Size = WatermarkSize.Scaled,
+                    WidthPercent = 15
+                };
+            case Watermark.PermanentTransparentActualSize:
+                return new ChannelWatermark
+                {
+                    ImageSource = ChannelWatermarkImageSource.Custom,
+                    Mode = ChannelWatermarkMode.Permanent,
+                    Opacity = 80,
+                    Size = WatermarkSize.ActualSize
+                };
         }
-        finally
-        {
-            if (File.Exists(tempFile))
-            {
-                File.Delete(tempFile);
-            }
-        }
+
+        return Option<ChannelWatermark>.None;
     }
 
     private static async Task GenerateTestFile(
@@ -709,20 +757,13 @@ public class TranscodingTests
                     TestContext.CurrentContext.TestDirectory,
                     "Resources",
                     subtitle == Subtitle.Picture ? "test.sup" : "test.srt");
-                var p2 = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = ExecutableName("mkvmerge"),
-                        Arguments =
-                            $"-o {tempFileName} {sourceFile} --field-order 0:{(videoScanKind == VideoScanKind.Interlaced ? '1' : '0')} {subPath}"
-                    }
-                };
 
-                p2.Start();
-                await p2.WaitForExitAsync();
-                // ReSharper disable once MethodHasAsyncOverload
-                p2.WaitForExit();
+                BufferedCommandResult p2 = await new Command(ExecutableName("mkvmerge"))
+                    .WithArguments(
+                        $"-o {tempFileName} {sourceFile} --field-order 0:{(videoScanKind == VideoScanKind.Interlaced ? '1' : '0')} {subPath}")
+                    .WithValidation(CommandResultValidation.None)
+                    .ExecuteBufferedAsync();
+                
                 if (p2.ExitCode != 0)
                 {
                     if (File.Exists(sourceFile))
@@ -789,6 +830,178 @@ public class TranscodingTests
         return BitConverter.ToString(hash).Replace("-", string.Empty);
     }
 
+    private static FFmpegLibraryProcessService GetService()
+    {
+        var imageCache = new Mock<IImageCache>();
+
+        // always return the static watermark resource
+        imageCache.Setup(
+                ic => ic.GetPathForImage(
+                    It.IsAny<string>(),
+                    It.Is<ArtworkKind>(x => x == ArtworkKind.Watermark),
+                    It.IsAny<Option<int>>()))
+            .Returns(Path.Combine(TestContext.CurrentContext.TestDirectory, "Resources", "ErsatzTV.png"));
+
+        var oldService = new FFmpegProcessService(
+            new FFmpegPlaybackSettingsCalculator(),
+            new FakeStreamSelector(),
+            imageCache.Object,
+            new Mock<ITempFilePool>().Object,
+            new Mock<IClient>().Object,
+            MemoryCache,
+            LoggerFactory.CreateLogger<FFmpegProcessService>());
+
+        var service = new FFmpegLibraryProcessService(
+            oldService,
+            new FFmpegPlaybackSettingsCalculator(),
+            new FakeStreamSelector(),
+            new Mock<ITempFilePool>().Object,
+            new PipelineBuilderFactory(
+                new RuntimeInfo(),
+                //new FakeNvidiaCapabilitiesFactory(),
+                new HardwareCapabilitiesFactory(
+                    MemoryCache,
+                    LoggerFactory.CreateLogger<HardwareCapabilitiesFactory>()),
+                LoggerFactory.CreateLogger<PipelineBuilderFactory>()),
+            LoggerFactory.CreateLogger<FFmpegLibraryProcessService>());
+
+        return service;
+    }
+
+    private async Task TranscodeAndVerify(
+        Command process,
+        Resolution profileResolution,
+        FFmpegProfileBitDepth profileBitDepth,
+        FFmpegProfileVideoFormat profileVideoFormat,
+        HardwareAccelerationKind profileAcceleration,
+        ILocalStatisticsProvider localStatisticsProvider,
+        Func<MediaVersion> getFinalMediaVersion)
+    {
+        string[] unsupportedMessages =
+        {
+            "No support for codec",
+            "No usable",
+            "Provided device doesn't support",
+            "Current pixel format is unsupported"
+        };
+
+        var sb = new StringBuilder();
+        var timeoutSignal = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        string tempFile = Path.GetTempFileName();
+        try
+        {
+            CommandResult result;
+
+            try
+            {
+                result = await process
+                    .WithStandardOutputPipe(PipeTarget.ToFile(tempFile))
+                    .WithStandardErrorPipe(PipeTarget.ToStringBuilder(sb))
+                    .ExecuteAsync(timeoutSignal.Token);
+
+                // var arguments = string.Join(
+                //     ' ',
+                //     process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
+                //
+                // Log.Logger.Debug(arguments);
+            }
+            catch (OperationCanceledException)
+            {
+                var arguments = string.Join(
+                    ' ',
+                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
+
+                Assert.Fail($"Transcode failure (timeout): ffmpeg {arguments}");
+                return;
+            }
+
+            var error = sb.ToString();
+            bool isUnsupported = unsupportedMessages.Any(error.Contains);
+
+            if (profileAcceleration != HardwareAccelerationKind.None && isUnsupported)
+            {
+                result.ExitCode.Should().Be(1, $"Error message with successful exit code? {process.Arguments}");
+                Assert.Warn($"Unsupported on this hardware: ffmpeg {process.Arguments}");
+            }
+            else if (error.Contains("Impossible to convert between"))
+            {
+                var arguments = string.Join(
+                    ' ',
+                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
+
+                Assert.Fail($"Transcode failure: ffmpeg {arguments}");
+            }
+            else
+            {
+                var arguments = string.Join(
+                    ' ',
+                    process.Arguments.Split(" ").Map(a => a.Contains('[') ? $"\"{a}\"" : a));
+
+                result.ExitCode.Should().Be(0, error + Environment.NewLine + arguments);
+                if (result.ExitCode == 0)
+                {
+                    Console.WriteLine(process.Arguments);
+                }
+            }
+            
+            // additional checks on resulting file
+            await localStatisticsProvider.RefreshStatistics(
+                ExecutableName("ffmpeg"),
+                ExecutableName("ffprobe"),
+                new Movie
+                {
+                    MediaVersions = new List<MediaVersion>
+                    {
+                        new()
+                        {
+                            MediaFiles = new List<MediaFile>
+                            {
+                                new() { Path = tempFile }
+                            }
+                        }
+                    }
+                });
+
+            MediaVersion v = getFinalMediaVersion();
+            
+            // verify de-interlace
+            v.VideoScanKind.Should().NotBe(VideoScanKind.Interlaced);
+            
+            // verify resolution
+            v.Height.Should().Be(profileResolution.Height);
+            v.Width.Should().Be(profileResolution.Width);
+
+            foreach (MediaStream videoStream in v.Streams.Filter(s => s.MediaStreamKind == MediaStreamKind.Video))
+            {
+                // verify pixel format
+                videoStream.PixelFormat.Should().Be(
+                    profileBitDepth == FFmpegProfileBitDepth.TenBit ? PixelFormat.YUV420P10LE : PixelFormat.YUV420P);
+                
+                // verify colors
+                var colorParams = new ColorParams(
+                    videoStream.ColorRange,
+                    videoStream.ColorSpace,
+                    videoStream.ColorTransfer,
+                    videoStream.ColorPrimaries);
+
+                // AMF doesn't seem to set this metadata properly
+                // MPEG2Video doesn't always seem to set this properly
+                if (profileAcceleration != HardwareAccelerationKind.Amf &&
+                    profileVideoFormat != FFmpegProfileVideoFormat.Mpeg2Video)
+                {
+                    colorParams.IsBt709.Should().BeTrue($"{colorParams}");
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(tempFile))
+            {
+                File.Delete(tempFile);
+            }
+        }
+    }
+
     private class FakeStreamSelector : IFFmpegStreamSelector
     {
         public Task<MediaStream> SelectVideoStream(MediaVersion version) =>
@@ -800,7 +1013,8 @@ public class TranscodingTests
             Channel channel,
             string preferredAudioLanguage,
             string preferredAudioTitle) =>
-            Optional(version.MediaVersion.Streams.First(s => s.MediaStreamKind == MediaStreamKind.Audio)).AsTask();
+            Optional(version.MediaVersion.Streams.FirstOrDefault(s => s.MediaStreamKind == MediaStreamKind.Audio))
+                .AsTask();
 
         public Task<Option<ErsatzTV.Core.Domain.Subtitle>> SelectSubtitleStream(
             List<ErsatzTV.Core.Domain.Subtitle> subtitles,
@@ -809,7 +1023,7 @@ public class TranscodingTests
             ChannelSubtitleMode subtitleMode) =>
             subtitles.HeadOrNone().AsTask();
     }
-
+    
     private static string ExecutableName(string baseName) =>
         OperatingSystem.IsWindows() ? $"{baseName}.exe" : baseName;
 }

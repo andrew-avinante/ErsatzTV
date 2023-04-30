@@ -2,18 +2,25 @@
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Emby;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class EmbyMovieRepository : IEmbyMovieRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<EmbyMovieRepository> _logger;
 
-    public EmbyMovieRepository(IDbContextFactory<TvContext> dbContextFactory) => _dbContextFactory = dbContextFactory;
+    public EmbyMovieRepository(IDbContextFactory<TvContext> dbContextFactory, ILogger<EmbyMovieRepository> logger)
+    {
+        _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<List<EmbyItemEtag>> GetExistingMovies(EmbyLibrary library)
     {
@@ -66,6 +73,28 @@ public class EmbyMovieRepository : IEmbyMovieRepository
         return None;
     }
 
+    public async Task<Option<int>> FlagRemoteOnly(EmbyLibrary library, EmbyMovie movie)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        movie.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT EmbyMovie.Id FROM EmbyMovie
+              INNER JOIN MediaItem MI ON MI.Id = EmbyMovie.Id
+              INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+              WHERE EmbyMovie.ItemId = @ItemId",
+            new { LibraryId = library.Id, movie.ItemId });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 2 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;    }
+
     public async Task<List<int>> FlagFileNotFound(EmbyLibrary library, List<string> movieItemIds)
     {
         if (movieItemIds.Count == 0)
@@ -91,7 +120,10 @@ public class EmbyMovieRepository : IEmbyMovieRepository
         return ids;
     }
 
-    public async Task<Either<BaseError, MediaItemScanResult<EmbyMovie>>> GetOrAdd(EmbyLibrary library, EmbyMovie item)
+    public async Task<Either<BaseError, MediaItemScanResult<EmbyMovie>>> GetOrAdd(
+        EmbyLibrary library,
+        EmbyMovie item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<EmbyMovie> maybeExisting = await dbContext.EmbyMovies
@@ -101,6 +133,8 @@ public class EmbyMovieRepository : IEmbyMovieRepository
             .ThenInclude(mv => mv.MediaFiles)
             .Include(m => m.MediaVersions)
             .ThenInclude(mv => mv.Streams)
+            .Include(m => m.MediaVersions)
+            .ThenInclude(mv => mv.Chapters)
             .Include(m => m.MovieMetadata)
             .ThenInclude(mm => mm.Genres)
             .Include(m => m.MovieMetadata)
@@ -124,7 +158,7 @@ public class EmbyMovieRepository : IEmbyMovieRepository
         foreach (EmbyMovie embyMovie in maybeExisting)
         {
             var result = new MediaItemScanResult<EmbyMovie>(embyMovie) { IsAdded = false };
-            if (embyMovie.Etag != item.Etag)
+            if (embyMovie.Etag != item.Etag || deepScan)
             {
                 await UpdateMovie(dbContext, embyMovie, item);
                 result.IsUpdated = true;
@@ -151,6 +185,11 @@ public class EmbyMovieRepository : IEmbyMovieRepository
     {
         try
         {
+            if (await MediaItemRepository.MediaFileAlreadyExists(movie, library.Paths.Head().Id, dbContext, _logger))
+            {
+                return new MediaFileAlreadyExists();
+            }
+
             // blank out etag for initial save in case other updates fail
             string etag = movie.Etag;
             movie.Etag = string.Empty;
@@ -335,12 +374,13 @@ public class EmbyMovieRepository : IEmbyMovieRepository
             fanArt.DateAdded = incomingFanArt.DateAdded;
             fanArt.DateUpdated = incomingFanArt.DateUpdated;
         }
-
+        
         // version
         MediaVersion version = existing.MediaVersions.Head();
         MediaVersion incomingVersion = incoming.MediaVersions.Head();
         version.Name = incomingVersion.Name;
         version.DateAdded = incomingVersion.DateAdded;
+        version.Chapters = incomingVersion.Chapters;
 
         // media file
         MediaFile file = version.MediaFiles.Head();

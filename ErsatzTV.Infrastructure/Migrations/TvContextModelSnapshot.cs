@@ -15,7 +15,7 @@ namespace ErsatzTV.Infrastructure.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "7.0.2");
+            modelBuilder.HasAnnotation("ProductVersion", "7.0.4");
 
             modelBuilder.Entity("ErsatzTV.Core.Domain.Actor", b =>
                 {
@@ -397,6 +397,9 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.Property<int?>("MovieMetadataId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("MusicVideoMetadataId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Name")
                         .HasColumnType("TEXT");
 
@@ -408,6 +411,8 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.HasIndex("EpisodeMetadataId");
 
                     b.HasIndex("MovieMetadataId");
+
+                    b.HasIndex("MusicVideoMetadataId");
 
                     b.HasIndex("OtherVideoMetadataId");
 
@@ -1510,9 +1515,6 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.Property<int>("PlayoutId")
                         .HasColumnType("INTEGER");
 
-                    b.Property<int>("ProgramScheduleId")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int?>("SmartCollectionId")
                         .HasColumnType("INTEGER");
 
@@ -1525,8 +1527,6 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.HasIndex("MultiCollectionId");
 
                     b.HasIndex("PlayoutId");
-
-                    b.HasIndex("ProgramScheduleId");
 
                     b.HasIndex("SmartCollectionId");
 
@@ -2455,6 +2455,9 @@ namespace ErsatzTV.Infrastructure.Migrations
                 {
                     b.HasBaseType("ErsatzTV.Core.Domain.MediaSource");
 
+                    b.Property<DateTime?>("LastCollectionsScan")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("OperatingSystem")
                         .HasColumnType("TEXT");
 
@@ -2862,6 +2865,11 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.HasOne("ErsatzTV.Core.Domain.MovieMetadata", null)
                         .WithMany("Directors")
                         .HasForeignKey("MovieMetadataId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("ErsatzTV.Core.Domain.MusicVideoMetadata", null)
+                        .WithMany("Directors")
+                        .HasForeignKey("MusicVideoMetadataId")
                         .OnDelete(DeleteBehavior.Cascade);
 
                     b.HasOne("ErsatzTV.Core.Domain.OtherVideoMetadata", null)
@@ -3367,12 +3375,6 @@ namespace ErsatzTV.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("ErsatzTV.Core.Domain.ProgramSchedule", "ProgramSchedule")
-                        .WithMany()
-                        .HasForeignKey("ProgramScheduleId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.HasOne("ErsatzTV.Core.Domain.SmartCollection", "SmartCollection")
                         .WithMany()
                         .HasForeignKey("SmartCollectionId")
@@ -3406,8 +3408,6 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.Navigation("MultiCollection");
 
                     b.Navigation("Playout");
-
-                    b.Navigation("ProgramSchedule");
 
                     b.Navigation("SmartCollection");
                 });
@@ -4226,6 +4226,8 @@ namespace ErsatzTV.Infrastructure.Migrations
                     b.Navigation("Artists");
 
                     b.Navigation("Artwork");
+
+                    b.Navigation("Directors");
 
                     b.Navigation("Genres");
 

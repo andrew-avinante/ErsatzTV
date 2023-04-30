@@ -98,6 +98,15 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                 preferredSubtitleLanguage,
                 subtitleMode);
 
+        foreach (Subtitle subtitle in maybeSubtitle)
+        {
+            if (subtitle.SubtitleKind == SubtitleKind.Sidecar)
+            {
+                // proxy to avoid dealing with escaping
+                subtitle.Path = $"http://localhost:{Settings.ListenPort}/media/subtitle/{subtitle.Id}";
+            }
+        }
+
         Option<WatermarkOptions> watermarkOptions = disableWatermarks
             ? None
             : await _ffmpegProcessService.GetWatermarkOptions(
@@ -140,10 +149,27 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             videoPath == audioPath ? playbackSettings.AudioDuration : Option<TimeSpan>.None,
             playbackSettings.NormalizeLoudness);
 
+        // don't log generated images, or hls direct, which are expected to have unknown format
+        bool isUnknownPixelFormatExpected =
+            videoPath != audioPath || channel.StreamingMode == StreamingMode.HttpLiveStreamingDirect;
+        ILogger<FFmpegLibraryProcessService> pixelFormatLogger = isUnknownPixelFormatExpected ? null : _logger;
+
+        IPixelFormat pixelFormat = await AvailablePixelFormats.ForPixelFormat(videoStream.PixelFormat, pixelFormatLogger)
+            .IfNoneAsync(
+                () =>
+                {
+                    return videoStream.BitsPerRawSample switch
+                    {
+                        8 => new PixelFormatYuv420P(),
+                        10 => new PixelFormatYuv420P10Le(),
+                        _ => new PixelFormatUnknown(videoStream.BitsPerRawSample)
+                    };
+                });
+        
         var ffmpegVideoStream = new VideoStream(
             videoStream.Index,
             videoStream.Codec,
-            AvailablePixelFormats.ForPixelFormat(videoStream.PixelFormat, _logger),
+            Some(pixelFormat),
             new ColorParams(
                 videoStream.ColorRange,
                 videoStream.ColorSpace,
@@ -179,9 +205,12 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                     subtitle.Codec,
                     StreamKind.Video);
 
-                string path = subtitle.IsImage
-                    ? videoPath
-                    : Path.Combine(FileSystemLayout.SubtitleCacheFolder, subtitle.Path);
+                string path = subtitle.IsImage switch
+                {
+                    true => videoPath,
+                    false when subtitle.SubtitleKind == SubtitleKind.Sidecar => subtitle.Path,
+                    _ => Path.Combine(FileSystemLayout.SubtitleCacheFolder, subtitle.Path)
+                };
 
                 return new SubtitleInputFile(
                     path,
@@ -210,16 +239,12 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             ? Path.Combine(FileSystemLayout.TranscodeFolder, channel.Number, "live%06d.ts")
             : Option<string>.None;
 
-        // normalize songs to yuv420p
-        IPixelFormat desiredPixelFormat =
-            videoPath == audioPath ? playbackSettings.PixelFormat : new PixelFormatYuv420P();
-
         var desiredState = new FrameState(
             playbackSettings.RealtimeOutput,
-            false, // TODO: fallback filler needs to loop
+            fillerKind == FillerKind.Fallback,
             videoFormat,
             Optional(videoStream.Profile),
-            Optional(desiredPixelFormat),
+            Optional(playbackSettings.PixelFormat),
             ffmpegVideoStream.SquarePixelFrameSize(
                 new FrameSize(channel.FFmpegProfile.Resolution.Width, channel.FFmpegProfile.Resolution.Height)),
             new FrameSize(channel.FFmpegProfile.Resolution.Width, channel.FFmpegProfile.Resolution.Height),
@@ -678,7 +703,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
     private static Option<string> VaapiDeviceName(HardwareAccelerationMode accelerationMode, string vaapiDevice) =>
         accelerationMode == HardwareAccelerationMode.Vaapi ||
         OperatingSystem.IsLinux() && accelerationMode == HardwareAccelerationMode.Qsv
-            ? vaapiDevice
+            ? string.IsNullOrWhiteSpace(vaapiDevice) ? "/dev/dri/renderD128" : vaapiDevice
             : Option<string>.None;
 
     private static string GetVideoFormat(FFmpegPlaybackSettings playbackSettings) =>

@@ -1,20 +1,28 @@
 ﻿using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Jellyfin;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class JellyfinMovieRepository : IJellyfinMovieRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<JellyfinMovieRepository> _logger;
 
-    public JellyfinMovieRepository(IDbContextFactory<TvContext> dbContextFactory) =>
+    public JellyfinMovieRepository(
+        IDbContextFactory<TvContext> dbContextFactory,
+        ILogger<JellyfinMovieRepository> logger)
+    {
         _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<List<JellyfinItemEtag>> GetExistingMovies(JellyfinLibrary library)
     {
@@ -67,6 +75,28 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
         return None;
     }
 
+    public async Task<Option<int>> FlagRemoteOnly(JellyfinLibrary library, JellyfinMovie movie)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        movie.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT JellyfinMovie.Id FROM JellyfinMovie
+              INNER JOIN MediaItem MI ON MI.Id = JellyfinMovie.Id
+              INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+              WHERE JellyfinMovie.ItemId = @ItemId",
+            new { LibraryId = library.Id, movie.ItemId });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 3 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;    }
+
     public async Task<List<int>> FlagFileNotFound(JellyfinLibrary library, List<string> movieItemIds)
     {
         if (movieItemIds.Count == 0)
@@ -94,7 +124,8 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
 
     public async Task<Either<BaseError, MediaItemScanResult<JellyfinMovie>>> GetOrAdd(
         JellyfinLibrary library,
-        JellyfinMovie item)
+        JellyfinMovie item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<JellyfinMovie> maybeExisting = await dbContext.JellyfinMovies
@@ -104,6 +135,8 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
             .ThenInclude(mv => mv.MediaFiles)
             .Include(m => m.MediaVersions)
             .ThenInclude(mv => mv.Streams)
+            .Include(m => m.MediaVersions)
+            .ThenInclude(mv => mv.Chapters)
             .Include(m => m.MovieMetadata)
             .ThenInclude(mm => mm.Genres)
             .Include(m => m.MovieMetadata)
@@ -127,7 +160,7 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
         foreach (JellyfinMovie jellyfinMovie in maybeExisting)
         {
             var result = new MediaItemScanResult<JellyfinMovie>(jellyfinMovie) { IsAdded = false };
-            if (jellyfinMovie.Etag != item.Etag)
+            if (jellyfinMovie.Etag != item.Etag || deepScan)
             {
                 await UpdateMovie(dbContext, jellyfinMovie, item);
                 result.IsUpdated = true;
@@ -317,6 +350,7 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
         MediaVersion incomingVersion = incoming.MediaVersions.Head();
         version.Name = incomingVersion.Name;
         version.DateAdded = incomingVersion.DateAdded;
+        version.Chapters = incomingVersion.Chapters;
 
         // media file
         MediaFile file = version.MediaFiles.Head();
@@ -333,6 +367,11 @@ public class JellyfinMovieRepository : IJellyfinMovieRepository
     {
         try
         {
+            if (await MediaItemRepository.MediaFileAlreadyExists(movie, library.Paths.Head().Id, dbContext, _logger))
+            {
+                return new MediaFileAlreadyExists();
+            }
+
             // blank out etag for initial save in case other updates fail
             string etag = movie.Etag;
             movie.Etag = string.Empty;

@@ -7,8 +7,18 @@ public class PlexStreamResponse
     [XmlAttribute("id")]
     public int Id { get; set; }
 
+    [XmlIgnore]
+    public int? Index { get; set; }
+
     [XmlAttribute("index")]
-    public int Index { get; set; }
+    public string IndexString
+    {
+        get => Index.HasValue ? Index.Value.ToString() : string.Empty;
+        set => Index = !string.IsNullOrEmpty(value) ? int.Parse(value) : null;
+    }
+
+    [XmlAttribute("key")]
+    public string Key { get; set; }
 
     [XmlAttribute("default")]
     public bool Default { get; set; }
@@ -16,8 +26,14 @@ public class PlexStreamResponse
     [XmlAttribute("forced")]
     public bool Forced { get; set; }
 
+    [XmlAttribute("embeddedInVideo")]
+    public bool EmbeddedInVideo { get; set; }
+
     [XmlAttribute("languageCode")]
     public string LanguageCode { get; set; }
+
+    [XmlAttribute("title")]
+    public string Title { get; set; }
 
     [XmlAttribute("streamType")]
     public int StreamType { get; set; }
@@ -31,6 +47,12 @@ public class PlexStreamResponse
     [XmlAttribute("channels")]
     public int Channels { get; set; }
 
+    [XmlAttribute("width")]
+    public int Width { get; set; }
+
+    [XmlAttribute("height")]
+    public int Height { get; set; }
+
     [XmlAttribute("anamorphic")]
     public bool Anamorphic { get; set; }
 
@@ -40,6 +62,24 @@ public class PlexStreamResponse
     [XmlAttribute("scanType")]
     public string ScanType { get; set; }
 
+    [XmlAttribute("frameRate")]
+    public string FrameRate { get; set; }
+
+    [XmlAttribute("bitDepth")]
+    public int BitDepth { get; set; }
+
+    [XmlAttribute("colorRange")]
+    public string ColorRange { get; set; }
+
+    [XmlAttribute("colorSpace")]
+    public string ColorSpace { get; set; }
+
+    [XmlAttribute("colorTrc")]
+    public string ColorTrc { get; set; }
+    
+    [XmlAttribute("colorPrimaries")]
+    public string ColorPrimaries { get; set; }
+    
     [XmlAttribute("displayTitle")]
     public string DisplayTitle { get; set; }
 

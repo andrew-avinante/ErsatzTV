@@ -178,7 +178,7 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
     protected static List<MediaChapter> ChaptersForMediaItem(MediaItem mediaItem)
     {
         MediaVersion version = mediaItem.GetHeadVersion();
-        return version.Chapters;
+        return Optional(version.Chapters).Flatten().OrderBy(c => c.StartTime).ToList();
     }
 
     protected void LogScheduledItem(
@@ -521,10 +521,14 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
         foreach (FillerPreset padFiller in Optional(
                      allFiller.FirstOrDefault(f => f.FillerMode == FillerMode.Pad && f.PadToNearestMinute.HasValue)))
         {
-            var totalDuration =
-                TimeSpan.FromMilliseconds(
-                    result.Sum(pi => (pi.Finish - pi.Start).TotalMilliseconds) +
+            var totalDuration = TimeSpan.FromMilliseconds(result.Sum(pi => (pi.Finish - pi.Start).TotalMilliseconds));
+
+            // add primary content to totalDuration only if it hasn't already been added
+            if (result.All(pi => pi.MediaItemId != playoutItem.MediaItemId))
+            {
+                totalDuration += TimeSpan.FromMilliseconds(
                     effectiveChapters.Sum(c => (c.EndTime - c.StartTime).TotalMilliseconds));
+            }
 
             int currentMinute = (playoutItem.StartOffset + totalDuration).Minute;
             // ReSharper disable once PossibleInvalidOperationException
@@ -589,10 +593,15 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
                             remainingToFill,
                             FillerKind.MidRoll,
                             padFiller.AllowWatermarks));
-                    TimeSpan average = effectiveChapters.Count == 0
+                    TimeSpan average = effectiveChapters.Count <= 1
                         ? remainingToFill
                         : remainingToFill / (effectiveChapters.Count - 1);
                     TimeSpan filled = TimeSpan.Zero;
+
+                    // remove post-roll to add after mid-roll/content
+                    var postRoll = result.Where(i => i.FillerKind == FillerKind.PostRoll).ToList();
+                    result.RemoveAll(i => i.FillerKind == FillerKind.PostRoll);
+                    
                     for (var i = 0; i < effectiveChapters.Count; i++)
                     {
                         result.Add(playoutItem.ForChapter(effectiveChapters[i]));
@@ -632,6 +641,8 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
                             }
                         }
                     }
+
+                    result.AddRange(postRoll);
 
                     break;
                 case FillerKind.PostRoll:

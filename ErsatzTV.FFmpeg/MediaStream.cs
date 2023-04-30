@@ -15,7 +15,7 @@ public record VideoStream(
     Option<IPixelFormat> PixelFormat,
     ColorParams ColorParams,
     FrameSize FrameSize,
-    string SampleAspectRatio,
+    string MaybeSampleAspectRatio,
     string DisplayAspectRatio,
     Option<string> FrameRate,
     bool StillImage,
@@ -25,7 +25,37 @@ public record VideoStream(
     StreamKind.Video)
 {
     public int BitDepth => PixelFormat.Map(pf => pf.BitDepth).IfNone(8);
-    
+
+    public string SampleAspectRatio
+    {
+        get
+        {
+            // some media servers don't provide sample aspect ratio so we have to calculate it
+            if (string.IsNullOrWhiteSpace(MaybeSampleAspectRatio) || MaybeSampleAspectRatio == "0:0")
+            {
+                // first check for decimal DAR
+                if (!double.TryParse(DisplayAspectRatio, out double dar))
+                {
+                    // if not, assume it's a ratio
+                    string[] split = DisplayAspectRatio.Split(':');
+                    var num = double.Parse(split[0]);
+                    var den = double.Parse(split[1]);
+                    dar = num / den;
+                }
+
+                double res = FrameSize.Width / (double)FrameSize.Height;
+                return $"{dar}:{res}";
+            }
+            else
+            {
+                string[] split = MaybeSampleAspectRatio.Split(':');
+                var num = double.Parse(split[0]);
+                var den = double.Parse(split[1]);
+                return $"{num}:{den}";
+            }
+        }
+    }
+
     public bool IsAnamorphic
     {
         get
@@ -63,18 +93,15 @@ public record VideoStream(
 
         if (IsAnamorphic)
         {
-            string[] split = SampleAspectRatio.Split(':');
-            var num = double.Parse(split[0]);
-            var den = double.Parse(split[1]);
-
+            double sar = GetSAR();
             bool edgeCase = IsAnamorphicEdgeCase;
 
             width = edgeCase
                 ? FrameSize.Width
-                : (int)Math.Floor(FrameSize.Width * num / den);
+                : (int)Math.Floor(FrameSize.Width * sar);
 
             height = edgeCase
-                ? (int)Math.Floor(FrameSize.Height * num / den)
+                ? (int)Math.Floor(FrameSize.Height * sar)
                 : FrameSize.Height;
         }
 
@@ -87,5 +114,32 @@ public record VideoStream(
             (int)Math.Floor(height * minPercent));
 
         return result;
+    }
+
+    private double GetSAR()
+    {
+        // some media servers don't provide sample aspect ratio so we have to calculate it
+        if (string.IsNullOrWhiteSpace(MaybeSampleAspectRatio) || MaybeSampleAspectRatio == "0:0")
+        {
+            // first check for decimal DAR
+            if (!double.TryParse(DisplayAspectRatio, out double dar))
+            {
+                // if not, assume it's a ratio
+                string[] split = DisplayAspectRatio.Split(':');
+                var num = double.Parse(split[0]);
+                var den = double.Parse(split[1]);
+                dar = num / den;
+            }
+
+            double res = FrameSize.Width / (double)FrameSize.Height;
+            return dar / res;
+        }
+        else
+        {
+            string[] split = MaybeSampleAspectRatio.Split(':');
+            var num = double.Parse(split[0]);
+            var den = double.Parse(split[1]);
+            return num / den;
+        }
     }
 }

@@ -19,6 +19,7 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
     private readonly ILogger _logger;
 
     public VaapiPipelineBuilder(
+        IFFmpegCapabilities ffmpegCapabilities,
         IHardwareCapabilities hardwareCapabilities,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<VideoInputFile> videoInputFile,
@@ -28,6 +29,7 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         string reportsFolder,
         string fontsFolder,
         ILogger logger) : base(
+        ffmpegCapabilities,
         hardwareAccelerationMode,
         videoInputFile,
         audioInputFile,
@@ -48,18 +50,18 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         PipelineContext context,
         ICollection<IPipelineStep> pipelineSteps)
     {
-        bool canDecode = _hardwareCapabilities.CanDecode(
+        FFmpegCapability decodeCapability = _hardwareCapabilities.CanDecode(
             videoStream.Codec,
             desiredState.VideoProfile,
             videoStream.PixelFormat);
-        bool canEncode = _hardwareCapabilities.CanEncode(
+        FFmpegCapability encodeCapability = _hardwareCapabilities.CanEncode(
             desiredState.VideoFormat,
             desiredState.VideoProfile,
             desiredState.PixelFormat);
 
         foreach (string vaapiDevice in ffmpegState.VaapiDevice)
         {
-            pipelineSteps.Add(new VaapiHardwareAccelerationOption(vaapiDevice, canDecode));
+            pipelineSteps.Add(new VaapiHardwareAccelerationOption(vaapiDevice, decodeCapability));
 
             foreach (string driverName in ffmpegState.VaapiDriver)
             {
@@ -70,27 +72,26 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         // use software decoding with an extensive pipeline
         if (context is { HasSubtitleOverlay: true, HasWatermark: true })
         {
-            canDecode = false;
+            decodeCapability = FFmpegCapability.Software;
         }
 
         // disable hw accel if decoder/encoder isn't supported
         return ffmpegState with
         {
-            DecoderHardwareAccelerationMode = canDecode
+            DecoderHardwareAccelerationMode = decodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.Vaapi
                 : HardwareAccelerationMode.None,
-            EncoderHardwareAccelerationMode = canEncode
+            EncoderHardwareAccelerationMode = encodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.Vaapi
                 : HardwareAccelerationMode.None
         };
     }
 
-    protected override void SetDecoder(
+    protected override Option<IDecoder> SetDecoder(
         VideoInputFile videoInputFile,
         VideoStream videoStream,
         FFmpegState ffmpegState,
-        PipelineContext context,
-        ICollection<IPipelineStep> pipelineSteps)
+        PipelineContext context)
     {
         Option<IDecoder> maybeDecoder = (ffmpegState.DecoderHardwareAccelerationMode, videoStream.Codec) switch
         {
@@ -101,7 +102,10 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         foreach (IDecoder decoder in maybeDecoder)
         {
             videoInputFile.AddOption(decoder);
+            return Some(decoder);
         }
+
+        return None;
     }
 
     protected override FilterChain SetVideoFilters(
@@ -110,6 +114,7 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         Option<WatermarkInputFile> watermarkInputFile,
         Option<SubtitleInputFile> subtitleInputFile,
         PipelineContext context,
+        Option<IDecoder> maybeDecoder,
         FFmpegState ffmpegState,
         FrameState desiredState,
         string fontsFolder,
@@ -122,15 +127,14 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
         {
             ScaledSize = videoStream.FrameSize,
             PaddedSize = videoStream.FrameSize,
-
             PixelFormat = videoStream.PixelFormat,
-
             IsAnamorphic = videoStream.IsAnamorphic,
-
-            FrameDataLocation = ffmpegState.DecoderHardwareAccelerationMode == HardwareAccelerationMode.Vaapi
-                ? FrameDataLocation.Hardware
-                : FrameDataLocation.Software
         };
+        
+        foreach (IDecoder decoder in maybeDecoder)
+        {
+            currentState = decoder.NextState(currentState);
+        }
 
         // easier to use nv12 for overlay
         if (context.HasSubtitleOverlay || context.HasWatermark)
@@ -197,6 +201,7 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
                 {
                     (HardwareAccelerationMode.Vaapi, VideoFormat.Hevc) => new EncoderHevcVaapi(),
                     (HardwareAccelerationMode.Vaapi, VideoFormat.H264) => new EncoderH264Vaapi(),
+                    (HardwareAccelerationMode.Vaapi, VideoFormat.Mpeg2Video) => new EncoderMpeg2Vaapi(),
 
                     (_, _) => GetSoftwareEncoder(currentState, desiredState)
                 };
@@ -245,7 +250,7 @@ public class VaapiPipelineBuilder : SoftwarePipelineBuilder
 
             if (!videoStream.ColorParams.IsBt709)
             {
-                _logger.LogDebug("Adding colorspace filter");
+                // _logger.LogDebug("Adding colorspace filter");
                 var colorspace = new ColorspaceFilter(
                     currentState,
                     videoStream,

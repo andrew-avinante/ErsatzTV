@@ -1,15 +1,12 @@
 ﻿using System.Threading.Channels;
 using Bugsnag;
 using ErsatzTV.Application;
+using ErsatzTV.Application.Channels;
 using ErsatzTV.Application.Maintenance;
 using ErsatzTV.Application.MediaCollections;
-using ErsatzTV.Application.MediaSources;
 using ErsatzTV.Application.Playouts;
-using ErsatzTV.Application.Search;
 using ErsatzTV.Application.Subtitles;
 using ErsatzTV.Core;
-using ErsatzTV.Core.Errors;
-using ErsatzTV.Core.Interfaces.Locking;
 using MediatR;
 
 namespace ErsatzTV.Services;
@@ -48,10 +45,15 @@ public class WorkerService : BackgroundService
                 try
                 {
                     IMediator mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-                    IEntityLocker entityLocker = scope.ServiceProvider.GetRequiredService<IEntityLocker>();
 
                     switch (request)
                     {
+                        case RefreshChannelList refreshChannelList:
+                            await mediator.Send(refreshChannelList, cancellationToken);
+                            break;
+                        case RefreshChannelData refreshChannelData:
+                            await mediator.Send(refreshChannelData, cancellationToken);
+                            break;
                         case BuildPlayout buildPlayout:
                             Either<BaseError, Unit> buildPlayoutResult = await mediator.Send(
                                 buildPlayout,
@@ -63,43 +65,11 @@ public class WorkerService : BackgroundService
                                     buildPlayout.PlayoutId,
                                     error.Value));
                             break;
-                        case IScanLocalLibrary scanLocalLibrary:
-                            Either<BaseError, string> scanResult = await mediator.Send(
-                                scanLocalLibrary,
-                                cancellationToken);
-
-                            scanResult.BiIter(
-                                name => _logger.LogDebug(
-                                    "Done scanning local library {Library}",
-                                    name),
-                                error =>
-                                {
-                                    if (error is ScanIsNotRequired)
-                                    {
-                                        _logger.LogDebug(
-                                            "Scan is not required for local library {LibraryId} at this time",
-                                            scanLocalLibrary.LibraryId);
-                                    }
-                                    else
-                                    {
-                                        _logger.LogWarning(
-                                            "Unable to scan local library {LibraryId}: {Error}",
-                                            scanLocalLibrary.LibraryId,
-                                            error.Value);
-                                    }
-                                });
-
-                            if (entityLocker.IsLibraryLocked(scanLocalLibrary.LibraryId))
-                            {
-                                entityLocker.UnlockLibrary(scanLocalLibrary.LibraryId);
-                            }
-                            break;
-                        case RebuildSearchIndex rebuildSearchIndex:
-                            await mediator.Send(rebuildSearchIndex, cancellationToken);
-                            break;
                         case DeleteOrphanedArtwork deleteOrphanedArtwork:
-                            _logger.LogInformation("Deleting orphaned artwork from the database");
                             await mediator.Send(deleteOrphanedArtwork, cancellationToken);
+                            break;
+                        case DeleteOrphanedSubtitles deleteOrphanedSubtitles:
+                            await mediator.Send(deleteOrphanedSubtitles, cancellationToken);
                             break;
                         case AddTraktList addTraktList:
                             await mediator.Send(addTraktList, cancellationToken);

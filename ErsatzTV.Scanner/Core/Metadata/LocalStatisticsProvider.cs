@@ -214,7 +214,7 @@ public class LocalStatisticsProvider : ILocalStatisticsProvider
 
         version.DateUpdated = _localFileSystem.GetLastWriteTime(filePath);
 
-        return await _metadataRepository.UpdateLocalStatistics(mediaItem, version) && durationChange;
+        return await _metadataRepository.UpdateStatistics(mediaItem, version) && durationChange;
     }
 
     private async Task<Either<BaseError, FFprobe>> GetProbeOutput(string ffprobePath, string filePath)
@@ -257,7 +257,16 @@ public class LocalStatisticsProvider : ILocalStatisticsProvider
                 }
             }
 
-            return ffprobe;
+            // fix chapter ids to be something sensible
+            var maybeChapters = Optional(ffprobe.chapters).Flatten().ToList();
+            var newChapters = new List<FFprobeChapter>();
+            for (var index = 0; index < maybeChapters.Count; index++)
+            {
+                FFprobeChapter chapter = maybeChapters[index];
+                newChapters.Add(chapter with { id = index });
+            }
+
+            return ffprobe with { chapters = newChapters };
         }
 
         return BaseError.New("Unable to deserialize ffprobe output");

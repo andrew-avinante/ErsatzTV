@@ -6,7 +6,6 @@ using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Jellyfin;
 using ErsatzTV.Core.Metadata;
-using ErsatzTV.Scanner.Core.Interfaces.Metadata;
 using ErsatzTV.Scanner.Core.Metadata;
 using Microsoft.Extensions.Logging;
 
@@ -19,6 +18,7 @@ public class JellyfinMovieLibraryScanner :
     private readonly IJellyfinApiClient _jellyfinApiClient;
     private readonly IJellyfinMovieRepository _jellyfinMovieRepository;
     private readonly IMediaSourceRepository _mediaSourceRepository;
+    private readonly ILogger<JellyfinMovieLibraryScanner> _logger;
     private readonly IJellyfinPathReplacementService _pathReplacementService;
 
     public JellyfinMovieLibraryScanner(
@@ -28,13 +28,11 @@ public class JellyfinMovieLibraryScanner :
         IJellyfinPathReplacementService pathReplacementService,
         IMediaSourceRepository mediaSourceRepository,
         ILocalFileSystem localFileSystem,
-        ILocalStatisticsProvider localStatisticsProvider,
-        ILocalSubtitlesProvider localSubtitlesProvider,
+        IMetadataRepository metadataRepository,
         ILogger<JellyfinMovieLibraryScanner> logger)
         : base(
-            localStatisticsProvider,
-            localSubtitlesProvider,
             localFileSystem,
+            metadataRepository,
             mediator,
             logger)
     {
@@ -42,14 +40,16 @@ public class JellyfinMovieLibraryScanner :
         _jellyfinMovieRepository = jellyfinMovieRepository;
         _pathReplacementService = pathReplacementService;
         _mediaSourceRepository = mediaSourceRepository;
+        _logger = logger;
     }
+
+    protected override bool ServerSupportsRemoteStreaming => true;
 
     public async Task<Either<BaseError, Unit>> ScanLibrary(
         string address,
         string apiKey,
         JellyfinLibrary library,
-        string ffmpegPath,
-        string ffprobePath,
+        bool deepScan,
         CancellationToken cancellationToken)
     {
         List<JellyfinPathReplacement> pathReplacements =
@@ -68,9 +68,7 @@ public class JellyfinMovieLibraryScanner :
             new JellyfinConnectionParameters(address, apiKey, library.MediaSourceId),
             library,
             GetLocalPath,
-            ffmpegPath,
-            ffprobePath,
-            false,
+            deepScan,
             cancellationToken);
     }
 
@@ -104,6 +102,41 @@ public class JellyfinMovieLibraryScanner :
         JellyfinMovie incoming,
         bool deepScan) =>
         Task.FromResult<Option<MovieMetadata>>(None);
+
+    protected override Task<Option<Tuple<MovieMetadata, MediaVersion>>> GetFullMetadataAndStatistics(
+        JellyfinConnectionParameters connectionParameters,
+        JellyfinLibrary library,
+        MediaItemScanResult<JellyfinMovie> result,
+        JellyfinMovie incoming) => Task.FromResult(Option<Tuple<MovieMetadata, MediaVersion>>.None);
+    
+    protected override async Task<Option<MediaVersion>> GetMediaServerStatistics(
+        JellyfinConnectionParameters connectionParameters,
+        JellyfinLibrary library,
+        MediaItemScanResult<JellyfinMovie> result,
+        JellyfinMovie incoming)
+    {
+        _logger.LogDebug("Refreshing {Attribute} for {Path}", "Jellyfin Statistics", result.LocalPath);
+
+        Either<BaseError, MediaVersion> maybeVersion =
+            await _jellyfinApiClient.GetPlaybackInfo(
+                connectionParameters.Address,
+                connectionParameters.ApiKey,
+                library,
+                incoming.ItemId);
+
+        foreach (BaseError error in maybeVersion.LeftToSeq())
+        {
+            _logger.LogWarning("Failed to get movie statistics from Jellyfin: {Error}", error.ToString());
+        }
+
+        // chapters are pulled with metadata, not with statistics, but we need to save them here
+        foreach (MediaVersion version in maybeVersion.RightToSeq())
+        {
+            version.Chapters = result.Item.GetHeadVersion().Chapters;
+        }
+
+        return maybeVersion.ToOption();
+    }
 
     protected override Task<Either<BaseError, MediaItemScanResult<JellyfinMovie>>> UpdateMetadata(
         MediaItemScanResult<JellyfinMovie> result,

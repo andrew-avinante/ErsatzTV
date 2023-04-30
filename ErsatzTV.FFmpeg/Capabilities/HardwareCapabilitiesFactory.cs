@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text;
 using System.Text.RegularExpressions;
 using CliWrap;
@@ -13,6 +14,7 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
     private const string ArchitectureCacheKey = "ffmpeg.hardware.nvidia.architecture";
     private const string ModelCacheKey = "ffmpeg.hardware.nvidia.model";
     private const string VaapiCacheKeyFormat = "ffmpeg.hardware.vaapi.{0}.{1}";
+    private const string FFmpegCapabilitiesCacheKeyFormat = "ffmpeg.{0}";
     private readonly ILogger<HardwareCapabilitiesFactory> _logger;
 
     private readonly IMemoryCache _memoryCache;
@@ -23,18 +25,112 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         _logger = logger;
     }
 
+    public async Task<IFFmpegCapabilities> GetFFmpegCapabilities(string ffmpegPath)
+    {
+        IReadOnlySet<string> ffmpegDecoders = await GetFFmpegCapabilities(ffmpegPath, "decoders");
+        IReadOnlySet<string> ffmpegFilters = await GetFFmpegCapabilities(ffmpegPath, "filters");
+        IReadOnlySet<string> ffmpegEncoders = await GetFFmpegCapabilities(ffmpegPath, "encoders");
+
+        return new FFmpegCapabilities(ffmpegDecoders, ffmpegFilters, ffmpegEncoders);
+    }
+
     public async Task<IHardwareCapabilities> GetHardwareCapabilities(
+        IFFmpegCapabilities ffmpegCapabilities,
         string ffmpegPath,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<string> vaapiDriver,
-        Option<string> vaapiDevice) =>
-        hardwareAccelerationMode switch
+        Option<string> vaapiDevice)
+    {
+        return hardwareAccelerationMode switch
         {
-            HardwareAccelerationMode.Nvenc => await GetNvidiaCapabilities(ffmpegPath),
+            HardwareAccelerationMode.Nvenc => await GetNvidiaCapabilities(ffmpegPath, ffmpegCapabilities),
             HardwareAccelerationMode.Vaapi => await GetVaapiCapabilities(vaapiDriver, vaapiDevice),
             HardwareAccelerationMode.Amf => new AmfHardwareCapabilities(),
             _ => new DefaultHardwareCapabilities()
         };
+    }
+
+    public async Task<string> GetNvidiaOutput(string ffmpegPath)
+    {
+        string[] arguments =
+        {
+            "-f", "lavfi",
+            "-i", "nullsrc",
+            "-c:v", "h264_nvenc",
+            "-gpu", "list",
+            "-f", "null", "-"
+        };
+
+        BufferedCommandResult result = await Cli.Wrap(ffmpegPath)
+            .WithArguments(arguments)
+            .WithValidation(CommandResultValidation.None)
+            .ExecuteBufferedAsync(Encoding.UTF8);
+
+        string output = string.IsNullOrWhiteSpace(result.StandardOutput)
+            ? result.StandardError
+            : result.StandardOutput;
+        
+        return output;
+    }
+
+    public async Task<Option<string>> GetVaapiOutput(Option<string> vaapiDriver, string vaapiDevice)
+    {
+        BufferedCommandResult whichResult = await Cli.Wrap("which")
+            .WithArguments("vainfo")
+            .WithValidation(CommandResultValidation.None)
+            .ExecuteBufferedAsync(Encoding.UTF8);
+
+        if (whichResult.ExitCode != 0)
+        {
+            return Option<string>.None;
+        }
+
+        var envVars = new Dictionary<string, string?>();
+        foreach (string libvaDriverName in vaapiDriver)
+        {
+            envVars.Add("LIBVA_DRIVER_NAME", libvaDriverName);
+        }
+
+        BufferedCommandResult result = await Cli.Wrap("vainfo")
+            .WithArguments($"--display drm --device {vaapiDevice}")
+            .WithEnvironmentVariables(envVars)
+            .WithValidation(CommandResultValidation.None)
+            .ExecuteBufferedAsync(Encoding.UTF8);
+
+        return result.StandardOutput;
+    }
+
+    private async Task<IReadOnlySet<string>> GetFFmpegCapabilities(string ffmpegPath, string capabilities)
+    {
+        var cacheKey = string.Format(FFmpegCapabilitiesCacheKeyFormat, capabilities);
+        if (_memoryCache.TryGetValue(cacheKey, out IReadOnlySet<string>? cachedDecoders) &&
+            cachedDecoders is not null)
+        {
+            return cachedDecoders;
+        }
+        
+        string[] arguments = { "-hide_banner", $"-{capabilities}" };
+
+        BufferedCommandResult result = await Cli.Wrap(ffmpegPath)
+            .WithArguments(arguments)
+            .WithValidation(CommandResultValidation.None)
+            .ExecuteBufferedAsync(Encoding.UTF8);
+
+        string output = string.IsNullOrWhiteSpace(result.StandardOutput)
+            ? result.StandardError
+            : result.StandardOutput;
+
+        return output.Split("\n").Map(s => s.Trim())
+            .Bind(l => ParseFFmpegLine(l))
+            .ToImmutableHashSet();
+    }
+
+    private static Option<string> ParseFFmpegLine(string input)
+    {
+        const string PATTERN = @"^\s*?[A-Z\.]+\s+(\w+).*";
+        Match match = Regex.Match(input, PATTERN);
+        return match.Success ? match.Groups[1].Value : Option<string>.None;
+    }
 
     private async Task<IHardwareCapabilities> GetVaapiCapabilities(
         Option<string> vaapiDriver,
@@ -63,32 +159,16 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
                 return new VaapiHardwareCapabilities(profileEntrypoints, _logger);
             }
 
-            BufferedCommandResult whichResult = await Cli.Wrap("which")
-                .WithArguments("vainfo")
-                .WithValidation(CommandResultValidation.None)
-                .ExecuteBufferedAsync(Encoding.UTF8);
-
-            if (whichResult.ExitCode != 0)
+            Option<string> output = await GetVaapiOutput(vaapiDriver, device);
+            if (output.IsNone)
             {
                 _logger.LogWarning("Unable to determine VAAPI capabilities; please install vainfo");
                 return new DefaultHardwareCapabilities();
             }
             
-            var envVars = new Dictionary<string, string?>();
-            foreach (string libvaDriverName in vaapiDriver)
-            {
-                envVars.Add("LIBVA_DRIVER_NAME", libvaDriverName);
-            }
-
-            BufferedCommandResult result = await Cli.Wrap("vainfo")
-                .WithArguments($"--display drm --device {device}")
-                .WithEnvironmentVariables(envVars)
-                .WithValidation(CommandResultValidation.None)
-                .ExecuteBufferedAsync(Encoding.UTF8);
-
             profileEntrypoints = new List<VaapiProfileEntrypoint>();
 
-            foreach (string line in result.StandardOutput.Split("\n"))
+            foreach (string line in string.Join("", output).Split("\n"))
             {
                 const string PROFILE_ENTRYPOINT_PATTERN = @"(VAProfile\w*).*(VAEntrypoint\w*)";
                 Match match = Regex.Match(line, PROFILE_ENTRYPOINT_PATTERN);
@@ -126,32 +206,22 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         return new NoHardwareCapabilities();
     }
 
-    private async Task<IHardwareCapabilities> GetNvidiaCapabilities(string ffmpegPath)
+    private async Task<IHardwareCapabilities> GetNvidiaCapabilities(
+        string ffmpegPath,
+        IFFmpegCapabilities ffmpegCapabilities)
     {
         if (_memoryCache.TryGetValue(ArchitectureCacheKey, out int cachedArchitecture)
             && _memoryCache.TryGetValue(ModelCacheKey, out string? cachedModel)
             && cachedModel is not null)
         {
-            return new NvidiaHardwareCapabilities(cachedArchitecture, cachedModel);
+            return new NvidiaHardwareCapabilities(
+                cachedArchitecture,
+                cachedModel,
+                ffmpegCapabilities,
+                _logger);
         }
 
-        string[] arguments =
-        {
-            "-f", "lavfi",
-            "-i", "nullsrc",
-            "-c:v", "h264_nvenc",
-            "-gpu", "list",
-            "-f", "null", "-"
-        };
-
-        BufferedCommandResult result = await Cli.Wrap(ffmpegPath)
-            .WithArguments(arguments)
-            .WithValidation(CommandResultValidation.None)
-            .ExecuteBufferedAsync(Encoding.UTF8);
-
-        string output = string.IsNullOrWhiteSpace(result.StandardOutput)
-            ? result.StandardError
-            : result.StandardOutput;
+        string output = await GetNvidiaOutput(ffmpegPath);
 
         Option<string> maybeLine = Optional(output.Split("\n").FirstOrDefault(x => x.Contains("GPU")));
         foreach (string line in maybeLine)
@@ -169,13 +239,12 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
                     architecture);
                 _memoryCache.Set(ArchitectureCacheKey, architecture);
                 _memoryCache.Set(ModelCacheKey, model);
-                return new NvidiaHardwareCapabilities(architecture, model);
+                return new NvidiaHardwareCapabilities(architecture, model, ffmpegCapabilities, _logger);
             }
         }
 
         _logger.LogWarning(
-            "Error detecting NVIDIA GPU capabilities; some hardware accelerated features will be unavailable: {ExitCode}",
-            result.ExitCode);
+            "Error detecting NVIDIA GPU capabilities; some hardware accelerated features will be unavailable");
 
         return new NoHardwareCapabilities();
     }

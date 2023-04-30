@@ -1,6 +1,7 @@
 ﻿using System.Threading.Channels;
 using ErsatzTV.Application.Libraries;
 using ErsatzTV.Core;
+using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.FFmpeg.Runtime;
@@ -67,13 +68,15 @@ public class CallLocalLibraryScannerHandler : CallLibraryScannerHandler<IScanLoc
 
     protected override async Task<DateTimeOffset> GetLastScan(TvContext dbContext, IScanLocalLibrary request)
     {
-        var libraryPaths = await dbContext.LibraryPaths
+        List<LibraryPath> libraryPaths = await dbContext.LibraryPaths
             .Filter(lp => lp.LibraryId == request.LibraryId)
             .ToListAsync();
         
-        return libraryPaths.Any()
+        DateTime minDateTime = libraryPaths.Any()
             ? libraryPaths.Min(lp => lp.LastScan ?? SystemTime.MinValueUtc)
             : SystemTime.MaxValueUtc;
+
+        return new DateTimeOffset(minDateTime, TimeSpan.Zero);
     }
 
     protected override bool ScanIsRequired(

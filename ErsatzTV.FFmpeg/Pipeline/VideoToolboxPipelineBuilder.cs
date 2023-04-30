@@ -16,6 +16,7 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
     private readonly ILogger _logger;
 
     public VideoToolboxPipelineBuilder(
+        IFFmpegCapabilities ffmpegCapabilities,
         IHardwareCapabilities hardwareCapabilities,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<VideoInputFile> videoInputFile,
@@ -25,6 +26,7 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
         string reportsFolder,
         string fontsFolder,
         ILogger logger) : base(
+        ffmpegCapabilities,
         hardwareAccelerationMode,
         videoInputFile,
         audioInputFile,
@@ -45,11 +47,11 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
         PipelineContext context,
         ICollection<IPipelineStep> pipelineSteps)
     {
-        bool canDecode = _hardwareCapabilities.CanDecode(
+        FFmpegCapability decodeCapability = _hardwareCapabilities.CanDecode(
             videoStream.Codec,
             desiredState.VideoProfile,
             videoStream.PixelFormat);
-        bool canEncode = _hardwareCapabilities.CanEncode(
+        FFmpegCapability encodeCapability = _hardwareCapabilities.CanEncode(
             desiredState.VideoFormat,
             desiredState.VideoProfile,
             desiredState.PixelFormat);
@@ -59,21 +61,20 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
         // disable hw accel if decoder/encoder isn't supported
         return ffmpegState with
         {
-            DecoderHardwareAccelerationMode = canDecode
+            DecoderHardwareAccelerationMode = decodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.VideoToolbox
                 : HardwareAccelerationMode.None,
-            EncoderHardwareAccelerationMode = canEncode
+            EncoderHardwareAccelerationMode = encodeCapability == FFmpegCapability.Hardware
                 ? HardwareAccelerationMode.VideoToolbox
                 : HardwareAccelerationMode.None
         };
     }
 
-    protected override void SetDecoder(
+    protected override Option<IDecoder> SetDecoder(
         VideoInputFile videoInputFile,
         VideoStream videoStream,
         FFmpegState ffmpegState,
-        PipelineContext context,
-        ICollection<IPipelineStep> pipelineSteps)
+        PipelineContext context)
     {
         Option<IDecoder> maybeDecoder = (ffmpegState.DecoderHardwareAccelerationMode, videoStream.Codec) switch
         {
@@ -85,7 +86,10 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
         foreach (IDecoder decoder in maybeDecoder)
         {
             videoInputFile.AddOption(decoder);
+            return Some(decoder);
         }
+
+        return None;
     }
 
     protected override Option<IEncoder> GetEncoder(FFmpegState ffmpegState, FrameState currentState, FrameState desiredState)
@@ -113,7 +117,7 @@ public class VideoToolboxPipelineBuilder : SoftwarePipelineBuilder
         {
             if (!videoStream.ColorParams.IsBt709)
             {
-                _logger.LogDebug("Adding colorspace filter");
+                // _logger.LogDebug("Adding colorspace filter");
                 var colorspace = new ColorspaceFilter(currentState, videoStream, pixelFormat);
                 currentState = colorspace.NextState(currentState);
                 result.Add(colorspace);

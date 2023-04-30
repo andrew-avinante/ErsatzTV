@@ -9,13 +9,13 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="FluentAssertions" Version="6.9.0" />
-        <PackageReference Include="LanguageExt.Core" Version="4.4.0" />
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.4.1" />
+        <PackageReference Include="FluentAssertions" Version="6.10.0" />
+        <PackageReference Include="LanguageExt.Core" Version="4.4.2" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
         <PackageReference Include="Moq" Version="4.18.4" />
         <PackageReference Include="NUnit" Version="3.13.3" />
-        <PackageReference Include="NUnit3TestAdapter" Version="4.3.1" />
-        <PackageReference Include="NUnit.Analyzers" Version="3.5.0">
+        <PackageReference Include="NUnit3TestAdapter" Version="4.4.2" />
+        <PackageReference Include="NUnit.Analyzers" Version="3.6.1">
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
           <PrivateAssets>all</PrivateAssets>
         </PackageReference>
@@ -38,6 +38,18 @@
         </Content>
         <Content Include="Resources\Nfo\EpisodeInvalidCharacters.nfo">
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <Content Include="Resources\ErsatzTV.png">
+          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <Content Include="Resources\test.srt">
+          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <Content Include="Resources\test.sup">
+          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <Content Include="Resources\song.mp3">
+          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
         </Content>
     </ItemGroup>
 

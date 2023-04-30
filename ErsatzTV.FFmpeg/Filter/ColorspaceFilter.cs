@@ -47,27 +47,56 @@ public class ColorspaceFilter : BaseFilter
                 hwdownload = "hwdownload,";
                 foreach (IPixelFormat pixelFormat in _currentState.PixelFormat)
                 {
-                    if (!string.IsNullOrWhiteSpace(pixelFormat.FFmpegName))
+                    string name = pixelFormat.FFmpegName;
+                    
+                    // vaapi is not a target software format
+                    if (pixelFormat is PixelFormatVaapi vaapi)
                     {
-                        hwdownload = $"hwdownload,format={pixelFormat.FFmpegName},";
+                        foreach (IPixelFormat pf in AvailablePixelFormats.ForPixelFormat(vaapi.Name, null))
+                        {
+                            name = pf.FFmpegName;
+                        }
+                    }
+                    
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        hwdownload = $"hwdownload,format={name},";
                     }
                 }
             }
 
-            string inputOverrides = string.Empty;
             ColorParams cp = _videoStream.ColorParams;
+
+            // bt470bg => bt709 seems to work correctly with `colormatrix` and NOT with `colorspace`
+            if (cp == ColorParams.Bt470Bg)
+            {
+                return _desiredPixelFormat.BitDepth switch
+                {
+                    10 => $"{hwdownload}colormatrix=src=bt470bg:dst=bt709,format=yuv420p10",
+                    8 => $"{hwdownload}colormatrix=src=bt470bg:dst=bt709,format=yuv420p",
+                    _ => string.Empty
+                };
+            }
+
+            string inputOverrides = string.Empty;
             if (cp.IsMixed || _forceInputOverrides)
             {
                 string range = string.IsNullOrWhiteSpace(cp.ColorRange) ? "tv" : cp.ColorRange;
-                string transfer = string.IsNullOrWhiteSpace(cp.ColorTransfer)
+
+                string transfer = string.IsNullOrWhiteSpace(cp.ColorTransfer) || string.Equals(cp.ColorTransfer, "reserved", StringComparison.OrdinalIgnoreCase)
                     ? "bt709"
                     : cp.ColorTransfer;
-                string primaries = string.IsNullOrWhiteSpace(cp.ColorPrimaries)
+
+                string primaries = string.IsNullOrWhiteSpace(cp.ColorPrimaries) || string.Equals(cp.ColorPrimaries, "reserved", StringComparison.OrdinalIgnoreCase)
                     ? "bt709"
                     : cp.ColorPrimaries;
 
+                string space = string.IsNullOrWhiteSpace(cp.ColorSpace) || string.Equals(cp.ColorSpace, "reserved", StringComparison.OrdinalIgnoreCase)
+                    ? "bt709"
+                    : cp.ColorSpace;
+
                 inputOverrides =
-                    $"irange={range}:ispace={cp.ColorSpace}:itrc={transfer}:iprimaries={primaries}:";
+                    $"irange={range}:ispace={space}:itrc={transfer}:iprimaries={primaries}:";
             }
 
             string colorspace = _desiredPixelFormat.BitDepth switch

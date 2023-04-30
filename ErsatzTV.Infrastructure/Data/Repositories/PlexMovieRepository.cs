@@ -1,19 +1,26 @@
 ﻿using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Errors;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Metadata;
 using ErsatzTV.Core.Plex;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class PlexMovieRepository : IPlexMovieRepository
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly ILogger<PlexMovieRepository> _logger;
 
-    public PlexMovieRepository(IDbContextFactory<TvContext> dbContextFactory) => _dbContextFactory = dbContextFactory;
+    public PlexMovieRepository(IDbContextFactory<TvContext> dbContextFactory, ILogger<PlexMovieRepository> logger)
+    {
+        _dbContextFactory = dbContextFactory;
+        _logger = logger;
+    }
 
     public async Task<List<PlexItemEtag>> GetExistingMovies(PlexLibrary library)
     {
@@ -66,6 +73,28 @@ public class PlexMovieRepository : IPlexMovieRepository
         return None;
     }
 
+    public async Task<Option<int>> FlagRemoteOnly(PlexLibrary library, PlexMovie movie)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+        movie.State = MediaItemState.RemoteOnly;
+
+        Option<int> maybeId = await dbContext.Connection.ExecuteScalarAsync<int>(
+            @"SELECT PlexMovie.Id FROM PlexMovie
+              INNER JOIN MediaItem MI ON MI.Id = PlexMovie.Id
+              INNER JOIN LibraryPath LP on MI.LibraryPathId = LP.Id AND LibraryId = @LibraryId
+              WHERE PlexMovie.Key = @Key",
+            new { LibraryId = library.Id, movie.Key });
+
+        foreach (int id in maybeId)
+        {
+            return await dbContext.Connection.ExecuteAsync(
+                @"UPDATE MediaItem SET State = 3 WHERE Id = @Id",
+                new { Id = id }).Map(count => count > 0 ? Some(id) : None);
+        }
+
+        return None;
+    }
     public async Task<List<int>> FlagFileNotFound(PlexLibrary library, List<string> plexMovieKeys)
     {
         if (plexMovieKeys.Count == 0)
@@ -91,7 +120,10 @@ public class PlexMovieRepository : IPlexMovieRepository
         return ids;
     }
 
-    public async Task<Either<BaseError, MediaItemScanResult<PlexMovie>>> GetOrAdd(PlexLibrary library, PlexMovie item)
+    public async Task<Either<BaseError, MediaItemScanResult<PlexMovie>>> GetOrAdd(
+        PlexLibrary library,
+        PlexMovie item,
+        bool deepScan)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         Option<PlexMovie> maybeExisting = await dbContext.PlexMovies
@@ -126,7 +158,7 @@ public class PlexMovieRepository : IPlexMovieRepository
         foreach (PlexMovie plexMovie in maybeExisting)
         {
             var result = new MediaItemScanResult<PlexMovie>(plexMovie) { IsAdded = false };
-            if (plexMovie.Etag != item.Etag)
+            if (plexMovie.Etag != item.Etag || deepScan)
             {
                 await UpdateMoviePath(dbContext, plexMovie, item);
                 result.IsUpdated = true;
@@ -153,6 +185,11 @@ public class PlexMovieRepository : IPlexMovieRepository
     {
         try
         {
+            if (await MediaItemRepository.MediaFileAlreadyExists(item, library.Paths.Head().Id, dbContext, _logger))
+            {
+                return new MediaFileAlreadyExists();
+            }
+
             // blank out etag for initial save in case stats/metadata/etc updates fail
             string etag = item.Etag;
             item.Etag = string.Empty;
