@@ -29,7 +29,7 @@ jobs:
       artifacts_version: ${{ env.ARTIFACTS_VERSION }}
       info_version: ${{ env.INFO_VERSION }}
   build_and_upload:
-    uses: jasongdove/ersatztv/.github/workflows/artifacts.yml@main
+    uses: andrew-avinante/ersatztv/.github/workflows/artifacts.yml@main
     needs: calculate_version
     with:
       release_tag: ${{ needs.calculate_version.outputs.artifacts_version }}
