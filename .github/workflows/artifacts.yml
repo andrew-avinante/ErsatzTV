@@ -15,14 +15,6 @@ on:
         required: true
         type: string
     secrets:
-      apple_developer_certificate_p12_base64:
-        required: true
-      apple_developer_certificate_password:
-        required: true
-      ac_username:
-        required: true
-      ac_password:
-        required: true
       gh_token:
         required: true
 jobs:
