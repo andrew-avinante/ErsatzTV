@@ -96,9 +96,6 @@ jobs:
 
           # Delete output directory
           rm -r "$release_name"
-        env:
-          AC_USERNAME: ${{ secrets.ac_username }}
-          AC_PASSWORD: ${{ secrets.ac_password }}
 
       - name: Delete old release assets
         uses: mknejp/delete-release-assets@v1
