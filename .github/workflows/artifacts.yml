@@ -50,12 +50,6 @@ jobs:
         with:
           node-version: '14'
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-        if: ${{ matrix.kind == 'windows' }}
-
       - name: Cache NPM dependencies
         uses: bahmutov/npm-install@v1.8.28
         with:
@@ -66,14 +60,6 @@ jobs:
 
       - name: Install dependencies
         run: dotnet restore -r "${{ matrix.target }}"
-
-      - uses: suisei-cn/actions-download-file@v1.3.0
-        if: ${{ matrix.kind == 'windows' }}
-        id: downloadffmpeg
-        name: Download ffmpeg
-        with:
-          url: "https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z"
-          target: ffmpeg/
 
       - name: Build
         shell: bash
@@ -88,11 +74,7 @@ jobs:
           dotnet publish ErsatzTV/ErsatzTV.csproj --framework net7.0 --runtime "${{ matrix.target }}" -c Release -o "$release_name" -p:InformationalVersion="${{ inputs.release_version }}-${{ matrix.target }}" -p:EnableCompressionInSingleFile=true -p:DebugType=Embedded -p:PublishSingleFile=true --self-contained true
 
           # Pack files
-          if [ "${{ matrix.kind }}" == "windows" ]; then
-            7z a -tzip "${release_name}.zip" "./${release_name}/*"
-          else
-            tar czvf "${release_name}.tar.gz" "$release_name"
-          fi
+          tar czvf "${release_name}.tar.gz" "$release_name"
 
           # Delete output directory
           rm -r "$release_name"
