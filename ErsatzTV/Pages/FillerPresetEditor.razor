@@ -45,6 +45,7 @@
                     <MudTimePicker Class="mt-3" Label="Filler Duration" @bind-Time="@_model.Duration" For="@(() => _model.Duration)" Disabled="@(_model.FillerMode != FillerMode.Duration)"/>
                     <MudTextField Class="mt-3" Label="Filler Count" @bind-Value="@_model.Count" For="@(() => _model.Count)" Disabled="@(_model.FillerMode != FillerMode.Count || _model.FillerKind == FillerKind.MidRollEnter || _model.FillerKind == FillerKind.MidRollExit)"/>
                         <MudSelect Class="mt-3" Label="Filler Pad To Nearest Minute" @bind-Value="_model.PadToNearestMinute" For="@(() => _model.PadToNearestMinute)" Disabled="@(_model.FillerMode != FillerMode.Pad || _model.FillerKind == FillerKind.MidRollEnter || _model.FillerKind == FillerKind.MidRollExit)">
+                        <MudSelectItem T="int?" Value="1">1 (:00, :01, :02, :03, :04, etc)</MudSelectItem>
                         <MudSelectItem T="int?" Value="5">5 (:00, :05, :10, :15, :20, etc)</MudSelectItem>
                         <MudSelectItem T="int?" Value="10">10 (:00, :10, :20, :30, :40, :50)</MudSelectItem>
                         <MudSelectItem T="int?" Value="15">15 (:00, :15, :30, :45)</MudSelectItem>
