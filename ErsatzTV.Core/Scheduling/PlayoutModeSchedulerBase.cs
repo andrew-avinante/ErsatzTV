@@ -571,6 +571,9 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
                                         filled += fallback.Finish - fallback.Start;
                                         result.Add(fallback);
                                     }
+                                } else
+                                {
+                                    break;
                                 }
                             }
 
