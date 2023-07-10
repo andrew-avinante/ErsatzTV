@@ -498,37 +498,40 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
                             TimeSpan current = TimeSpan.Zero;
                             List<PlayoutItem> midRollExit = new List<PlayoutItem>();
 
-                            foreach (FillerPreset fillerEnter in allFiller.Filter(
-                                f => f.FillerKind == FillerKind.MidRollEnter && f.FillerMode != FillerMode.Pad))
+                            if(current < average && filled < remainingToFill)
                             {
-                                IMediaCollectionEnumerator e3 = enumerators[CollectionKey.ForFillerPreset(fillerEnter)];
-                                result.AddRange(
-                                   AddCountFiller(
-                                       playoutBuilderState,
-                                       e3,
-                                       fillerEnter.Count.Value,
-                                       FillerKind.MidRollEnter,
-                                       fillerEnter.AllowWatermarks,
-                                       cancellationToken));
+                                foreach (FillerPreset fillerEnter in allFiller.Filter(
+                                    f => f.FillerKind == FillerKind.MidRollEnter && f.FillerMode != FillerMode.Pad))
+                                {
+                                    IMediaCollectionEnumerator e3 = enumerators[CollectionKey.ForFillerPreset(fillerEnter)];
+                                    result.AddRange(
+                                       AddCountFiller(
+                                           playoutBuilderState,
+                                           e3,
+                                           fillerEnter.Count.Value,
+                                           FillerKind.MidRollEnter,
+                                           fillerEnter.AllowWatermarks,
+                                           cancellationToken));
 
-                                current += DurationForMediaItem((MediaItem)e3.Current);
-                                filled += DurationForMediaItem((MediaItem)e3.Current);
-                            }
+                                    current += DurationForMediaItem((MediaItem)e3.Current);
+                                    filled += DurationForMediaItem((MediaItem)e3.Current);
+                                }
 
-                            foreach (FillerPreset fillerExit in allFiller.Filter(
-                                f => f.FillerKind == FillerKind.MidRollExit && f.FillerMode != FillerMode.Pad))
-                            {
-                                IMediaCollectionEnumerator e3 = enumerators[CollectionKey.ForFillerPreset(fillerExit)];
-                                midRollExit = AddCountFiller(
-                                       playoutBuilderState,
-                                       e3,
-                                       fillerExit.Count.Value,
-                                       FillerKind.MidRollExit,
-                                       fillerExit.AllowWatermarks,
-                                       cancellationToken);
+                                foreach (FillerPreset fillerExit in allFiller.Filter(
+                                    f => f.FillerKind == FillerKind.MidRollExit && f.FillerMode != FillerMode.Pad))
+                                {
+                                    IMediaCollectionEnumerator e3 = enumerators[CollectionKey.ForFillerPreset(fillerExit)];
+                                    midRollExit = AddCountFiller(
+                                           playoutBuilderState,
+                                           e3,
+                                           fillerExit.Count.Value,
+                                           FillerKind.MidRollExit,
+                                           fillerExit.AllowWatermarks,
+                                           cancellationToken);
 
-                                current += DurationForMediaItem((MediaItem)e3.Current);
-                                filled += DurationForMediaItem((MediaItem)e3.Current);
+                                    current += DurationForMediaItem((MediaItem)e3.Current);
+                                    filled += DurationForMediaItem((MediaItem)e3.Current);
+                                }
                             }
 
                             while (current < average && filled < remainingToFill)
@@ -564,7 +567,14 @@ public abstract class PlayoutModeSchedulerBase<T> : IPlayoutModeScheduler<T> whe
                                 }
                             }
 
-                            result.AddRange(midRollExit);
+                            // If there wasn't enough space to add in mid roll stuff then remove the roll enter
+                            if(result.Last().FillerKind == FillerKind.MidRollEnter)
+                            {
+                                result.Remove(result.Last());
+                            } else
+                            {
+                                result.AddRange(midRollExit);
+                            }
                         }
                     }
 
