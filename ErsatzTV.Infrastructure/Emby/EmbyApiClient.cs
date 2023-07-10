@@ -385,7 +385,7 @@ public class EmbyApiClient : IEmbyApiClient
             return None;
         }
     }
-    
+
     private static List<MediaChapter> ProjectToModel(
         IEnumerable<EmbyChapterResponse> embyChapters,
         TimeSpan duration)
@@ -744,7 +744,7 @@ public class EmbyApiClient : IEmbyApiClient
             Genres = Optional(item.Genres).Flatten().Map(g => new Genre { Name = g }).ToList(),
             Tags = Optional(item.TagItems).Flatten().Map(t => new Tag { Name = t.Name }).ToList(),
             Studios = new List<Studio>(),
-            Actors = new List<Actor>(),
+            Actors = Optional(item.People).Flatten().Collect(r => ProjectToActor(r, dateAdded)).ToList(),
             Artwork = new List<Artwork>(),
             Guids = GuidsFromProviderIds(item.ProviderIds),
             Directors = Optional(item.People).Flatten().Collect(r => ProjectToDirector(r)).ToList(),
@@ -800,8 +800,8 @@ public class EmbyApiClient : IEmbyApiClient
 
         return result;
     }
-    
-        private Option<MediaVersion> ProjectToMediaVersion(EmbyPlaybackInfoResponse response)
+
+    private Option<MediaVersion> ProjectToMediaVersion(EmbyPlaybackInfoResponse response)
     {
         if (response.MediaSources is null || response.MediaSources.Count == 0)
         {
@@ -818,23 +818,23 @@ public class EmbyApiClient : IEmbyApiClient
             {
                 int width = videoStream.Width ?? 1;
                 int height = videoStream.Height ?? 1;
-                
+
                 var isAnamorphic = false;
-                if (videoStream.IsAnamorphic.HasValue)
-                {
-                    isAnamorphic = videoStream.IsAnamorphic.Value;
-                }
-                else if (!string.IsNullOrWhiteSpace(videoStream.AspectRatio) && videoStream.AspectRatio.Contains(":"))
+                if (!string.IsNullOrWhiteSpace(videoStream.AspectRatio) && videoStream.AspectRatio.Contains(":"))
                 {
                     // if width/height != aspect ratio, is anamorphic
                     double resolutionRatio = width / (double)height;
-                    
+
                     string[] split = videoStream.AspectRatio.Split(":");
                     var num = double.Parse(split[0]);
                     var den = double.Parse(split[1]);
                     double aspectRatio = num / den;
 
                     isAnamorphic = Math.Abs(resolutionRatio - aspectRatio) > 0.01d;
+                }
+                else if (videoStream.IsAnamorphic.HasValue)
+                {
+                    isAnamorphic = videoStream.IsAnamorphic.Value;
                 }
 
                 var version = new MediaVersion

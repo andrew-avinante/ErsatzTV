@@ -3,7 +3,6 @@ using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Interfaces.Scheduling;
-using LanguageExt.UnsafeValueAccess;
 using Microsoft.Extensions.Logging;
 using Map = LanguageExt.Map;
 
@@ -15,11 +14,11 @@ public class PlayoutBuilder : IPlayoutBuilder
 {
     private static readonly Random Random = new();
     private readonly IArtistRepository _artistRepository;
-    private readonly IMultiEpisodeShuffleCollectionEnumeratorFactory _multiEpisodeFactory;
-    private readonly ILocalFileSystem _localFileSystem;
     private readonly IConfigElementRepository _configElementRepository;
+    private readonly ILocalFileSystem _localFileSystem;
     private readonly ILogger<PlayoutBuilder> _logger;
     private readonly IMediaCollectionRepository _mediaCollectionRepository;
+    private readonly IMultiEpisodeShuffleCollectionEnumeratorFactory _multiEpisodeFactory;
     private readonly ITelevisionRepository _televisionRepository;
 
     public PlayoutBuilder(
@@ -40,7 +39,7 @@ public class PlayoutBuilder : IPlayoutBuilder
         _logger = logger;
     }
 
-    public async Task<Playout> Build(Playout playout, PlayoutBuildMode mode)
+    public async Task<Playout> Build(Playout playout, PlayoutBuildMode mode, CancellationToken cancellationToken)
     {
         foreach (PlayoutParameters parameters in await Validate(playout))
         {
@@ -50,35 +49,43 @@ public class PlayoutBuilder : IPlayoutBuilder
             //     return await Build(playout, mode, parameters with { Start = parameters.Start.AddDays(-2) });
             // }
 
-            return await Build(playout, mode, parameters);
+            return await Build(playout, mode, parameters, cancellationToken);
         }
 
         return playout;
     }
 
-    private Task<Playout> Build(Playout playout, PlayoutBuildMode mode, PlayoutParameters parameters) =>
+    private Task<Playout> Build(
+        Playout playout,
+        PlayoutBuildMode mode,
+        PlayoutParameters parameters,
+        CancellationToken cancellationToken) =>
         mode switch
         {
-            PlayoutBuildMode.Refresh => RefreshPlayout(playout, parameters),
-            PlayoutBuildMode.Reset => ResetPlayout(playout, parameters),
-            _ => ContinuePlayout(playout, parameters)
+            PlayoutBuildMode.Refresh => RefreshPlayout(playout, parameters, cancellationToken),
+            PlayoutBuildMode.Reset => ResetPlayout(playout, parameters, cancellationToken),
+            _ => ContinuePlayout(playout, parameters, cancellationToken)
         };
 
     internal async Task<Playout> Build(
         Playout playout,
         PlayoutBuildMode mode,
         DateTimeOffset start,
-        DateTimeOffset finish)
+        DateTimeOffset finish,
+        CancellationToken cancellationToken)
     {
         foreach (PlayoutParameters parameters in await Validate(playout))
         {
-            return await Build(playout, mode, parameters with { Start = start, Finish = finish });
+            return await Build(playout, mode, parameters with { Start = start, Finish = finish }, cancellationToken);
         }
 
         return playout;
     }
 
-    private async Task<Playout> RefreshPlayout(Playout playout, PlayoutParameters parameters)
+    private async Task<Playout> RefreshPlayout(
+        Playout playout,
+        PlayoutParameters parameters,
+        CancellationToken cancellationToken)
     {
         _logger.LogDebug(
             "Refreshing playout {PlayoutId} for channel {ChannelNumber} - {ChannelName}",
@@ -183,10 +190,14 @@ public class PlayoutBuilder : IPlayoutBuilder
             parameters.Start,
             parameters.Finish,
             parameters.CollectionMediaItems,
-            false);
+            false,
+            cancellationToken);
     }
 
-    private async Task<Playout> ResetPlayout(Playout playout, PlayoutParameters parameters)
+    private async Task<Playout> ResetPlayout(
+        Playout playout,
+        PlayoutParameters parameters,
+        CancellationToken cancellationToken)
     {
         _logger.LogDebug(
             "Resetting playout {PlayoutId} for channel {ChannelNumber} - {ChannelName}",
@@ -203,12 +214,16 @@ public class PlayoutBuilder : IPlayoutBuilder
             parameters.Start,
             parameters.Finish,
             parameters.CollectionMediaItems,
-            true);
+            true,
+            cancellationToken);
 
         return playout;
     }
 
-    private async Task<Playout> ContinuePlayout(Playout playout, PlayoutParameters parameters)
+    private async Task<Playout> ContinuePlayout(
+        Playout playout,
+        PlayoutParameters parameters,
+        CancellationToken cancellationToken)
     {
         _logger.LogDebug(
             "Building playout {PlayoutId} for channel {ChannelNumber} - {ChannelName}",
@@ -227,7 +242,8 @@ public class PlayoutBuilder : IPlayoutBuilder
             parameters.Start,
             parameters.Finish,
             parameters.CollectionMediaItems,
-            false);
+            false,
+            cancellationToken);
 
         return playout;
     }
@@ -289,7 +305,8 @@ public class PlayoutBuilder : IPlayoutBuilder
         DateTimeOffset playoutStart,
         DateTimeOffset playoutFinish,
         Map<CollectionKey, List<MediaItem>> collectionMediaItems,
-        bool randomStartPoint)
+        bool randomStartPoint,
+        CancellationToken cancellationToken)
     {
         DateTimeOffset trimBefore = playoutStart.AddHours(-4);
         DateTimeOffset trimAfter = playoutFinish;
@@ -308,7 +325,14 @@ public class PlayoutBuilder : IPlayoutBuilder
         while (finish < playoutFinish)
         {
             _logger.LogDebug("Building playout from {Start} to {Finish}", start, finish);
-            playout = await BuildPlayoutItems(playout, start, finish, collectionMediaItems, true, randomStartPoint);
+            playout = await BuildPlayoutItems(
+                playout,
+                start,
+                finish,
+                collectionMediaItems,
+                true,
+                randomStartPoint,
+                cancellationToken);
 
             // only randomize once (at the start of the playout)
             randomStartPoint = false;
@@ -327,7 +351,8 @@ public class PlayoutBuilder : IPlayoutBuilder
                 playoutFinish,
                 collectionMediaItems,
                 false,
-                randomStartPoint);
+                randomStartPoint,
+                cancellationToken);
         }
 
         // remove old items
@@ -359,7 +384,8 @@ public class PlayoutBuilder : IPlayoutBuilder
         DateTimeOffset playoutFinish,
         Map<CollectionKey, List<MediaItem>> collectionMediaItems,
         bool saveAnchorDate,
-        bool randomStartPoint)
+        bool randomStartPoint,
+        CancellationToken cancellationToken)
     {
         ProgramSchedule activeSchedule = PlayoutScheduleSelector.GetProgramScheduleFor(
             playout.ProgramSchedule,
@@ -368,7 +394,7 @@ public class PlayoutBuilder : IPlayoutBuilder
 
         // random start points are disabled in some scenarios, so ensure it's enabled and active
         randomStartPoint = randomStartPoint && activeSchedule.RandomStartPoint;
-        
+
         var sortedScheduleItems = activeSchedule.Items.OrderBy(i => i.Index).ToList();
         CollectionEnumeratorState scheduleItemsEnumeratorState =
             playout.Anchor?.ScheduleItemsEnumeratorState ?? new CollectionEnumeratorState
@@ -391,7 +417,8 @@ public class PlayoutBuilder : IPlayoutBuilder
                     collectionKey,
                     mediaItems,
                     playbackOrder,
-                    randomStartPoint);
+                    randomStartPoint,
+                    cancellationToken);
             collectionEnumerators.Add(collectionKey, enumerator);
         }
 
@@ -441,9 +468,9 @@ public class PlayoutBuilder : IPlayoutBuilder
         var schedulerFlood = new PlayoutModeSchedulerFlood(_logger);
 
         var timeCount = new Dictionary<DateTimeOffset, int>();
-        
+
         // loop until we're done filling the desired amount of time
-        while (playoutBuilderState.CurrentTime < playoutFinish)
+        while (playoutBuilderState.CurrentTime < playoutFinish && !cancellationToken.IsCancellationRequested)
         {
             if (timeCount.TryGetValue(playoutBuilderState.CurrentTime, out int count))
             {
@@ -477,25 +504,29 @@ public class PlayoutBuilder : IPlayoutBuilder
                     collectionEnumerators,
                     multiple,
                     nextScheduleItem,
-                    playoutFinish),
+                    playoutFinish,
+                    cancellationToken),
                 ProgramScheduleItemDuration duration => schedulerDuration.Schedule(
                     playoutBuilderState,
                     collectionEnumerators,
                     duration,
                     nextScheduleItem,
-                    playoutFinish),
+                    playoutFinish,
+                    cancellationToken),
                 ProgramScheduleItemFlood flood => schedulerFlood.Schedule(
                     playoutBuilderState,
                     collectionEnumerators,
                     flood,
                     nextScheduleItem,
-                    playoutFinish),
+                    playoutFinish,
+                    cancellationToken),
                 ProgramScheduleItemOne one => schedulerOne.Schedule(
                     playoutBuilderState,
                     collectionEnumerators,
                     one,
                     nextScheduleItem,
-                    playoutFinish),
+                    playoutFinish,
+                    cancellationToken),
                 _ => throw new ArgumentOutOfRangeException(nameof(scheduleItem))
             };
 
@@ -715,7 +746,8 @@ public class PlayoutBuilder : IPlayoutBuilder
         CollectionKey collectionKey,
         List<MediaItem> mediaItems,
         PlaybackOrder playbackOrder,
-        bool randomStartPoint)
+        bool randomStartPoint,
+        CancellationToken cancellationToken)
     {
         Option<PlayoutProgramScheduleAnchor> maybeAnchor = playout.ProgramScheduleAnchors
             .OrderByDescending(a => a.AnchorDate ?? DateTime.MaxValue)
@@ -789,7 +821,8 @@ public class PlayoutBuilder : IPlayoutBuilder
                 return new ShuffleInOrderCollectionEnumerator(
                     await GetCollectionItemsForShuffleInOrder(collectionKey),
                     state,
-                    activeSchedule.RandomStartPoint);
+                    activeSchedule.RandomStartPoint,
+                    cancellationToken);
             case PlaybackOrder.MultiEpisodeShuffle when
                 collectionKey.CollectionType == ProgramScheduleItemCollectionType.TelevisionShow &&
                 collectionKey.MediaItemId.HasValue:
@@ -808,7 +841,7 @@ public class PlayoutBuilder : IPlayoutBuilder
                             _logger.LogDebug("Found JS Script at {Path}", jsScriptPath);
                             try
                             {
-                                return _multiEpisodeFactory.Create(jsScriptPath, mediaItems, state);
+                                return _multiEpisodeFactory.Create(jsScriptPath, mediaItems, state, cancellationToken);
                             }
                             catch (Exception ex)
                             {
@@ -828,7 +861,8 @@ public class PlayoutBuilder : IPlayoutBuilder
             case PlaybackOrder.Shuffle:
                 return new ShuffledMediaCollectionEnumerator(
                     await GetGroupedMediaItemsForShuffle(activeSchedule, mediaItems, collectionKey),
-                    state);
+                    state,
+                    cancellationToken);
             default:
                 // TODO: handle this error case differently?
                 return new RandomizedMediaCollectionEnumerator(mediaItems, state);

@@ -8,9 +8,9 @@ using ErsatzTV.Application.Subtitles.Queries;
 using ErsatzTV.Core;
 using ErsatzTV.Core.FFmpeg;
 using ErsatzTV.Extensions;
+using Flurl;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
-using Flurl;
 
 namespace ErsatzTV.Controllers;
 
@@ -73,8 +73,14 @@ public class InternalController : ControllerBase
                                 process.StartInfo.Environment[key] = value;
                             }
 
+                            var contentType = "video/mp2t";
+                            if (mode.ToLowerInvariant() == "hls-direct")
+                            {
+                                contentType = "video/mp4";
+                            }
+                            
                             process.Start();
-                            return new FileStreamResult(process.StandardOutput.BaseStream, "video/mp2t");
+                            return new FileStreamResult(process.StandardOutput.BaseStream, contentType);
                         },
                         error =>
                         {
@@ -99,7 +105,7 @@ public class InternalController : ControllerBase
             Left: _ => new NotFoundResult(),
             Right: r =>
             {
-                Url fullPath =  new Uri(r.Uri, path).SetQueryParam("X-Plex-Token", r.AuthToken);
+                Url fullPath = new Uri(r.Uri, path).SetQueryParam("X-Plex-Token", r.AuthToken);
                 return new RedirectResult(fullPath.ToString());
             });
     }
@@ -115,7 +121,7 @@ public class InternalController : ControllerBase
             Right: r =>
             {
                 Url fullPath;
-                
+
                 if (path.Contains("Subtitles"))
                 {
                     fullPath = Flurl.Url.Parse(r.Address)
@@ -133,7 +139,7 @@ public class InternalController : ControllerBase
                 return new RedirectResult(fullPath.ToString());
             });
     }
-    
+
     [HttpGet("/media/emby/{*path}")]
     public async Task<IActionResult> GetEmbyMedia(string path, CancellationToken cancellationToken)
     {
@@ -145,7 +151,7 @@ public class InternalController : ControllerBase
             Right: r =>
             {
                 Url fullPath;
-                
+
                 if (path.Contains("Subtitles"))
                 {
                     fullPath = Flurl.Url.Parse(r.Address)
@@ -178,12 +184,12 @@ public class InternalController : ControllerBase
                 {
                     return new RedirectResult(r);
                 }
-                
+
                 string mimeType = Path.GetExtension(r).ToLowerInvariant() switch
                 {
                     "ass" or "ssa" => "text/x-ssa",
                     "vtt" => "text/vtt",
-                    _ => "application/x-subrip",
+                    _ => "application/x-subrip"
                 };
 
                 return new PhysicalFileResult(r, mimeType);

@@ -1,21 +1,26 @@
 ﻿using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Scheduling;
 
 namespace ErsatzTV.Core.Scheduling;
 
 public class ShuffledMediaCollectionEnumerator : IMediaCollectionEnumerator
 {
+    private readonly CancellationToken _cancellationToken;
     private readonly int _mediaItemCount;
     private readonly IList<GroupedMediaItem> _mediaItems;
+    private readonly Lazy<Option<TimeSpan>> _lazyMinimumDuration;
     private CloneableRandom _random;
     private IList<MediaItem> _shuffled;
 
     public ShuffledMediaCollectionEnumerator(
         IList<GroupedMediaItem> mediaItems,
-        CollectionEnumeratorState state)
+        CollectionEnumeratorState state,
+        CancellationToken cancellationToken)
     {
         _mediaItemCount = mediaItems.Sum(i => 1 + Optional(i.Additional).Flatten().Count());
         _mediaItems = mediaItems;
+        _cancellationToken = cancellationToken;
 
         if (state.Index >= _mediaItems.Count)
         {
@@ -25,12 +30,26 @@ public class ShuffledMediaCollectionEnumerator : IMediaCollectionEnumerator
 
         _random = new CloneableRandom(state.Seed);
         _shuffled = Shuffle(_mediaItems, _random);
+        _lazyMinimumDuration =
+            new Lazy<Option<TimeSpan>>(() => _shuffled.Bind(i => i.GetDuration()).OrderBy(identity).HeadOrNone());
 
         State = new CollectionEnumeratorState { Seed = state.Seed };
         while (State.Index < state.Index)
         {
             MoveNext();
         }
+    }
+
+    public void ResetState(CollectionEnumeratorState state)
+    {
+        // only re-shuffle if needed
+        if (State.Seed != state.Seed)
+        {
+            _random = new CloneableRandom(state.Seed);
+            _shuffled = Shuffle(_mediaItems, _random);
+        }
+
+        State.Index = state.Index;
     }
 
     public CollectionEnumeratorState State { get; }
@@ -49,7 +68,8 @@ public class ShuffledMediaCollectionEnumerator : IMediaCollectionEnumerator
                 State.Seed = _random.Next();
                 _random = new CloneableRandom(State.Seed);
                 _shuffled = Shuffle(_mediaItems, _random);
-            } while (_mediaItems.Count > 1 && Current.Map(x => x.Id) == tail.Map(x => x.Id));
+            } while (!_cancellationToken.IsCancellationRequested && _mediaItems.Count > 1 &&
+                     Current.Map(x => x.Id) == tail.Map(x => x.Id));
         }
         else
         {
@@ -57,34 +77,6 @@ public class ShuffledMediaCollectionEnumerator : IMediaCollectionEnumerator
         }
 
         State.Index %= _mediaItemCount;
-    }
-
-    public Option<MediaItem> Peek(int offset)
-    {
-        if (offset == 0)
-        {
-            return Current;
-        }
-
-        if ((State.Index + offset) % _mediaItemCount == 0)
-        {
-            IList<MediaItem> shuffled;
-            Option<MediaItem> tail = Current;
-
-            // clone the random
-            CloneableRandom randomCopy = _random.Clone();
-
-            do
-            {
-                int newSeed = randomCopy.Next();
-                randomCopy = new CloneableRandom(newSeed);
-                shuffled = Shuffle(_mediaItems, randomCopy);
-            } while (_mediaItems.Count > 1 && shuffled[0] == tail);
-
-            return shuffled.Any() ? shuffled[0] : None;
-        }
-
-        return _shuffled.Any() ? _shuffled[(State.Index + offset) % _mediaItemCount] : None;
     }
 
     private IList<MediaItem> Shuffle(IEnumerable<GroupedMediaItem> list, CloneableRandom random)
@@ -101,4 +93,8 @@ public class ShuffledMediaCollectionEnumerator : IMediaCollectionEnumerator
 
         return GroupedMediaItem.FlattenGroups(copy, _mediaItemCount);
     }
+    
+    public Option<TimeSpan> MinimumDuration => _lazyMinimumDuration.Value;
+
+    public int Count => _shuffled.Count;
 }

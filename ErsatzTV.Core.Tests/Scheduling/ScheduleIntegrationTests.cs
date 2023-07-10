@@ -30,8 +30,12 @@ namespace ErsatzTV.Core.Tests.Scheduling;
 [Explicit]
 public class ScheduleIntegrationTests
 {
-    public ScheduleIntegrationTests()
-    {
+    [SetUp]
+    public void SetUp() => _cancellationToken = new CancellationTokenSource(TimeSpan.FromMinutes(1)).Token;
+
+    private CancellationToken _cancellationToken;
+
+    public ScheduleIntegrationTests() =>
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Debug()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
@@ -39,7 +43,6 @@ public class ScheduleIntegrationTests
             .WriteTo.Console()
             .Destructure.UsingAttributes()
             .CreateLogger();
-    }
 
     [Test]
     public async Task TestExistingData()
@@ -74,13 +77,13 @@ public class ScheduleIntegrationTests
                     o.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
                     o.MigrationsAssembly("ErsatzTV.Infrastructure");
                 }));
-        
+
         SqlMapper.AddTypeHandler(new DateTimeOffsetHandler());
         SqlMapper.AddTypeHandler(new GuidHandler());
         SqlMapper.AddTypeHandler(new TimeSpanHandler());
 
         services.AddSingleton((Func<IServiceProvider, ILoggerFactory>)(_ => new SerilogLoggerFactory()));
-        
+
         services.AddScoped<ISearchRepository, SearchRepository>();
         services.AddScoped<ICachingSearchRepository, CachingSearchRepository>();
         services.AddScoped<IConfigElementRepository, ConfigElementRepository>();
@@ -111,7 +114,7 @@ public class ScheduleIntegrationTests
         await searchIndex.Rebuild(
             provider.GetRequiredService<ICachingSearchRepository>(),
             provider.GetRequiredService<IFallbackMetadataProvider>());
-        
+
         var builder = new PlayoutBuilder(
             new ConfigElementRepository(factory),
             new MediaCollectionRepository(new Mock<IClient>().Object, searchIndex, factory),
@@ -122,38 +125,48 @@ public class ScheduleIntegrationTests
             provider.GetRequiredService<ILogger<PlayoutBuilder>>());
 
         {
-            await using TvContext context = await factory.CreateDbContextAsync();
+            await using TvContext context = await factory.CreateDbContextAsync(_cancellationToken);
 
             Option<Playout> maybePlayout = await GetPlayout(context, PLAYOUT_ID);
             Playout playout = maybePlayout.ValueUnsafe();
 
-            await builder.Build(playout, PlayoutBuildMode.Reset, start, finish);
+            await builder.Build(playout, PlayoutBuildMode.Reset, start, finish, _cancellationToken);
 
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(_cancellationToken);
         }
 
-        for (var i = 1; i <= (24 * 1); i++)
+        for (var i = 1; i <= 24 * 1; i++)
         {
-            await using TvContext context = await factory.CreateDbContextAsync();
-            
+            await using TvContext context = await factory.CreateDbContextAsync(_cancellationToken);
+
             Option<Playout> maybePlayout = await GetPlayout(context, PLAYOUT_ID);
             Playout playout = maybePlayout.ValueUnsafe();
 
-            await builder.Build(playout, PlayoutBuildMode.Continue, start.AddHours(i), finish.AddHours(i));
+            await builder.Build(
+                playout,
+                PlayoutBuildMode.Continue,
+                start.AddHours(i),
+                finish.AddHours(i),
+                _cancellationToken);
 
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(_cancellationToken);
         }
-        
+
         for (var i = 25; i <= 26; i++)
         {
-            await using TvContext context = await factory.CreateDbContextAsync();
-            
+            await using TvContext context = await factory.CreateDbContextAsync(_cancellationToken);
+
             Option<Playout> maybePlayout = await GetPlayout(context, PLAYOUT_ID);
             Playout playout = maybePlayout.ValueUnsafe();
 
-            await builder.Build(playout, PlayoutBuildMode.Continue, start.AddHours(i), finish.AddHours(i));
+            await builder.Build(
+                playout,
+                PlayoutBuildMode.Continue,
+                start.AddHours(i),
+                finish.AddHours(i),
+                _cancellationToken);
 
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(_cancellationToken);
         }
     }
 
@@ -186,7 +199,7 @@ public class ScheduleIntegrationTests
                     o.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
                     o.MigrationsAssembly("ErsatzTV.Infrastructure");
                 }));
-        
+
         SqlMapper.AddTypeHandler(new DateTimeOffsetHandler());
         SqlMapper.AddTypeHandler(new GuidHandler());
         SqlMapper.AddTypeHandler(new TimeSpanHandler());
@@ -208,7 +221,7 @@ public class ScheduleIntegrationTests
         {
             Path = "Test LibraryPath"
         };
-        
+
         var library = new LocalLibrary
         {
             MediaKind = LibraryMediaKind.Movies,
@@ -216,9 +229,9 @@ public class ScheduleIntegrationTests
             MediaSource = new LocalMediaSource()
         };
 
-        await dbContext.Libraries.AddAsync(library);
-        await dbContext.SaveChangesAsync();
-        
+        await dbContext.Libraries.AddAsync(library, _cancellationToken);
+        await dbContext.SaveChangesAsync(_cancellationToken);
+
         var movies = new List<Movie>();
         for (var i = 1; i < 25; i++)
         {
@@ -243,8 +256,8 @@ public class ScheduleIntegrationTests
             movies.Add(movie);
         }
 
-        await dbContext.Movies.AddRangeAsync(movies);
-        await dbContext.SaveChangesAsync();
+        await dbContext.Movies.AddRangeAsync(movies, _cancellationToken);
+        await dbContext.SaveChangesAsync(_cancellationToken);
 
         var collection = new Collection
         {
@@ -252,8 +265,8 @@ public class ScheduleIntegrationTests
             MediaItems = movies.Cast<MediaItem>().ToList()
         };
 
-        await dbContext.Collections.AddAsync(collection);
-        await dbContext.SaveChangesAsync();
+        await dbContext.Collections.AddAsync(collection, _cancellationToken);
+        await dbContext.SaveChangesAsync(_cancellationToken);
 
         var scheduleItems = new List<ProgramScheduleItem>
         {
@@ -269,9 +282,9 @@ public class ScheduleIntegrationTests
 
         int playoutId = await AddTestData(dbContext, scheduleItems);
 
-        DateTimeOffset start = new DateTimeOffset(2022, 7, 26, 8, 0, 5, TimeSpan.FromHours(-5));
+        var start = new DateTimeOffset(2022, 7, 26, 8, 0, 5, TimeSpan.FromHours(-5));
         DateTimeOffset finish = start.AddDays(2);
-        
+
         var builder = new PlayoutBuilder(
             new ConfigElementRepository(factory),
             new MediaCollectionRepository(new Mock<IClient>().Object, new Mock<ISearchIndex>().Object, factory),
@@ -281,16 +294,21 @@ public class ScheduleIntegrationTests
             new Mock<ILocalFileSystem>().Object,
             provider.GetRequiredService<ILogger<PlayoutBuilder>>());
 
-        for (var i = 0; i <= (24 * 4); i++)
+        for (var i = 0; i <= 24 * 4; i++)
         {
-            await using TvContext context = await factory.CreateDbContextAsync();
-            
+            await using TvContext context = await factory.CreateDbContextAsync(_cancellationToken);
+
             Option<Playout> maybePlayout = await GetPlayout(context, playoutId);
             Playout playout = maybePlayout.ValueUnsafe();
 
-            await builder.Build(playout, PlayoutBuildMode.Continue, start.AddHours(i), finish.AddHours(i));
+            await builder.Build(
+                playout,
+                PlayoutBuildMode.Continue,
+                start.AddHours(i),
+                finish.AddHours(i),
+                _cancellationToken);
 
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(_cancellationToken);
         }
     }
 
@@ -303,7 +321,7 @@ public class ScheduleIntegrationTests
 
         await dbContext.FFmpegProfiles.AddAsync(ffmpegProfile);
         await dbContext.SaveChangesAsync();
-        
+
         var channel = new Channel(Guid.Parse("00000000-0000-0000-0000-000000000001"))
         {
             Name = "Test Channel",
@@ -337,12 +355,10 @@ public class ScheduleIntegrationTests
         return playout.Id;
     }
 
-    private static async Task<Option<Playout>> GetPlayout(TvContext dbContext, int playoutId)
-    {
-        return await dbContext.Playouts
+    private static async Task<Option<Playout>> GetPlayout(TvContext dbContext, int playoutId) =>
+        await dbContext.Playouts
             .Include(p => p.Channel)
             .Include(p => p.Items)
-            
             .Include(p => p.ProgramScheduleAlternates)
             .ThenInclude(a => a.ProgramSchedule)
             .ThenInclude(ps => ps.Items)
@@ -371,12 +387,10 @@ public class ScheduleIntegrationTests
             .ThenInclude(a => a.ProgramSchedule)
             .ThenInclude(ps => ps.Items)
             .ThenInclude(psi => psi.FallbackFiller)
-            
             .Include(p => p.ProgramScheduleAnchors)
             .ThenInclude(a => a.EnumeratorState)
             .Include(p => p.ProgramScheduleAnchors)
             .ThenInclude(a => a.MediaItem)
-            
             .Include(p => p.ProgramSchedule)
             .ThenInclude(ps => ps.Items)
             .ThenInclude(psi => psi.Collection)
@@ -399,5 +413,4 @@ public class ScheduleIntegrationTests
             .ThenInclude(ps => ps.Items)
             .ThenInclude(psi => psi.FallbackFiller)
             .SelectOneAsync(p => p.Id, p => p.Id == playoutId);
-    }
 }

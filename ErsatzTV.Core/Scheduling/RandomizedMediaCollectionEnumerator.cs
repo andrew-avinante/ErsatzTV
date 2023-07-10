@@ -1,4 +1,5 @@
 ﻿using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Scheduling;
 
 namespace ErsatzTV.Core.Scheduling;
@@ -6,12 +7,15 @@ namespace ErsatzTV.Core.Scheduling;
 public class RandomizedMediaCollectionEnumerator : IMediaCollectionEnumerator
 {
     private readonly IList<MediaItem> _mediaItems;
+    private readonly Lazy<Option<TimeSpan>> _lazyMinimumDuration;
     private readonly Random _random;
     private int _index;
 
     public RandomizedMediaCollectionEnumerator(IList<MediaItem> mediaItems, CollectionEnumeratorState state)
     {
         _mediaItems = mediaItems;
+        _lazyMinimumDuration =
+            new Lazy<Option<TimeSpan>>(() => _mediaItems.Bind(i => i.GetDuration()).OrderBy(identity).HeadOrNone());
         _random = new Random(state.Seed);
 
         State = new CollectionEnumeratorState { Seed = state.Seed };
@@ -21,6 +25,12 @@ public class RandomizedMediaCollectionEnumerator : IMediaCollectionEnumerator
         {
             MoveNext();
         }
+    }
+
+    public void ResetState(CollectionEnumeratorState state)
+    {
+        // seed never changes here, no need to reset
+        State.Index = state.Index;
     }
 
     public CollectionEnumeratorState State { get; }
@@ -33,6 +43,7 @@ public class RandomizedMediaCollectionEnumerator : IMediaCollectionEnumerator
         State.Index++;
     }
 
-    public Option<MediaItem> Peek(int offset) =>
-        throw new NotSupportedException();
+    public Option<TimeSpan> MinimumDuration => _lazyMinimumDuration.Value;
+    
+    public int Count => _mediaItems.Count;
 }

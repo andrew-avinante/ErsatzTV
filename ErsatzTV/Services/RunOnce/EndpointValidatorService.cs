@@ -4,7 +4,7 @@ using ErsatzTV.Core;
 
 namespace ErsatzTV.Services.RunOnce;
 
-public class EndpointValidatorService : IHostedService
+public class EndpointValidatorService : BackgroundService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<EndpointValidatorService> _logger;
@@ -15,8 +15,10 @@ public class EndpointValidatorService : IHostedService
         _logger = logger;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
+        await Task.Yield();
+
         string urls = _configuration.GetValue<string>("Kestrel:Endpoints:Http:Url");
         if (urls.Split(";").Length > 1)
         {
@@ -43,16 +45,12 @@ public class EndpointValidatorService : IHostedService
         {
             throw new NotSupportedException($"Invalid endpoint format: {urls}");
         }
-        
+
         string baseUrl = Environment.GetEnvironmentVariable("ETV_BASE_URL");
 
         _logger.LogInformation(
             "Server will listen on port {Port} - try UI at {UI}",
             Settings.ListenPort,
             $"http://localhost:{Settings.ListenPort}{baseUrl}");
-
-        return Task.CompletedTask;
     }
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

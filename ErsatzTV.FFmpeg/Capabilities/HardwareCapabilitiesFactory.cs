@@ -39,16 +39,14 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         string ffmpegPath,
         HardwareAccelerationMode hardwareAccelerationMode,
         Option<string> vaapiDriver,
-        Option<string> vaapiDevice)
-    {
-        return hardwareAccelerationMode switch
+        Option<string> vaapiDevice) =>
+        hardwareAccelerationMode switch
         {
             HardwareAccelerationMode.Nvenc => await GetNvidiaCapabilities(ffmpegPath, ffmpegCapabilities),
             HardwareAccelerationMode.Vaapi => await GetVaapiCapabilities(vaapiDriver, vaapiDevice),
             HardwareAccelerationMode.Amf => new AmfHardwareCapabilities(),
             _ => new DefaultHardwareCapabilities()
         };
-    }
 
     public async Task<string> GetNvidiaOutput(string ffmpegPath)
     {
@@ -69,7 +67,7 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         string output = string.IsNullOrWhiteSpace(result.StandardOutput)
             ? result.StandardError
             : result.StandardOutput;
-        
+
         return output;
     }
 
@@ -92,7 +90,7 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         }
 
         BufferedCommandResult result = await Cli.Wrap("vainfo")
-            .WithArguments($"--display drm --device {vaapiDevice}")
+            .WithArguments($"--display drm --device {vaapiDevice} -a")
             .WithEnvironmentVariables(envVars)
             .WithValidation(CommandResultValidation.None)
             .ExecuteBufferedAsync(Encoding.UTF8);
@@ -108,7 +106,7 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
         {
             return cachedDecoders;
         }
-        
+
         string[] arguments = { "-hide_banner", $"-{capabilities}" };
 
         BufferedCommandResult result = await Cli.Wrap(ffmpegPath)
@@ -165,23 +163,13 @@ public class HardwareCapabilitiesFactory : IHardwareCapabilitiesFactory
                 _logger.LogWarning("Unable to determine VAAPI capabilities; please install vainfo");
                 return new DefaultHardwareCapabilities();
             }
-            
-            profileEntrypoints = new List<VaapiProfileEntrypoint>();
 
-            foreach (string line in string.Join("", output).Split("\n"))
+            foreach (string o in output)
             {
-                const string PROFILE_ENTRYPOINT_PATTERN = @"(VAProfile\w*).*(VAEntrypoint\w*)";
-                Match match = Regex.Match(line, PROFILE_ENTRYPOINT_PATTERN);
-                if (match.Success)
-                {
-                    profileEntrypoints.Add(
-                        new VaapiProfileEntrypoint(
-                            match.Groups[1].Value.Trim(),
-                            match.Groups[2].Value.Trim()));
-                }
+                profileEntrypoints = VaapiCapabilityParser.ParseFull(o);
             }
 
-            if (profileEntrypoints.Any())
+            if (profileEntrypoints?.Any() ?? false)
             {
                 _logger.LogInformation(
                     "Detected {Count} VAAPI profile entrypoints for using {Driver} {Device}",

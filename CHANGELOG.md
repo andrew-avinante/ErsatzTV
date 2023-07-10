@@ -5,6 +5,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Added
+- Add custom resolution management to `Settings` page
+
+### Fixed
+- Only allow a single instance of ErsatzTV to run
+  - This fixes some cases where the search index would become unusable
+- Fix VAAPI rate control mode capability check 
+
+### Changed
+- Rework startup process to show UI as early as possible
+  - A minimal UI will indicate when the database and search index are initializing
+  - The UI will automatically refresh when the initialization processes have completed
+- Force ffmpeg to use one thread when hardware acceleration is used since hardware acceleration does not support multiple threads
+
+## [0.8.0-beta] - 2023-06-23
+### Added
+- Disable playout buttons and show spinning indicator when a playout is being modified (built/extended, or subtitles are being extracted)
+- Automatically reload playout details table when playout build is complete
+- Add `Discard To Fill Attempts` setting to duration playout mode
+  - This setting only has an effect when it's configured to be greater than zero and when using `Shuffle` or `Random` playback order
+  - When the current item is longer than the remaining duration, it will be discarded and ETV will try to fit the next item in the collection, up to the configured number of times
+  - When the remaining duration is shorter than all items in the collection, the normal filler logic will be used
+- Add `Finish` column to playout detail table
+
+### Fixed
+- Skip checking for subtitles to extract when subtitles are not enabled on a channel/schedule item
+- Properly scale subtitles when using hardware acceleration
+- Fix color normalization of content with missing color metadata when using NVIDIA acceleration
+- `VAAPI`: explicitly use `CQP` rate control mode when it's the only compatible mode
+- Fix scaling anamorphic Emby content that Emby claims is not anamorphic
+
+### Changed
+- `HLS Direct` streaming mode
+    - Use `MPEG-TS` container/output format by default to maintain v0.7.8 compatibility
+      - `MP4` and `MKV` container/output format can still be configured in `Settings`
+    - Improve `MP4` compatibility with certain content
+- For `Pad` and `Duration` filler - prioritize filling the configured pad/duration
+  - This will skip filler that is too long in an attempt to avoid unscheduled time
+  - You may see the same filler more often, which means you may want to add more filler to your library so ETV has more options
+- Update ffmpeg, libraries and drivers in all docker images
+
+## [0.7.9-beta] - 2023-06-10
+### Added
+- Synchronize actor metadata from Jellyfin and Emby television libraries
+  - New libraries and new episodes will get actor data automatically
+  - Existing libraries can deep scan (one time) to retrieve actor data for existing episodes
+- `HLS Direct` streaming mode
+    - Use `MP4` container/output format by default, with new global option to use `MKV` container/output format
+    - `MP4` output format: stream copy dvd subtitles
+    - `MKV` output format: stream copy any embedded subtitles
+
+### Fixed
+- Fix extracting embedded text subtitles that had been incompletely extracted in the past 
+- Fix fallback filler looping by forcing software mode for this content
+  - Other content will still use hardware acceleration as configured
+  - Hardware-accelerated fallback filler may be re-enabled in the future
+- Fix playout building when shuffle in order is used with a single media item
+- Fix pgs subtitle burn in from media server libraries
+- Fix subtitle and watermark overlays with RadeonSI VAAPI driver
+- Fix NVIDIA pipeline to use hardware-accelerated decoder with 8-bit h264 content   
+
+### Changed
+- Timeout playout builds after 2 minutes; this should prevent playout bugs from blocking other functionality
+
+## [0.7.8-beta] - 2023-04-29
+### Added
 - Add `Season, Episode` playback order
   - This is currently *only* available when a show is added directly to a schedule
   - This will ignore release date and sort exclusively by season number and then by episode number
@@ -1640,7 +1705,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Initial release to facilitate testing outside of Docker.
 
 
-[Unreleased]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.7-beta...HEAD
+[Unreleased]: https://github.com/jasongdove/ErsatzTV/compare/v0.8.0-beta...HEAD
+[0.8.0-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.9-beta...v0.8.0-beta
+[0.7.9-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.8-beta...v0.7.9-beta
+[0.7.8-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.7-beta...v0.7.8-beta
 [0.7.7-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.6-beta...v0.7.7-beta
 [0.7.6-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.5-beta...v0.7.6-beta
 [0.7.5-beta]: https://github.com/jasongdove/ErsatzTV/compare/v0.7.4-beta...v0.7.5-beta

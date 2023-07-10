@@ -1,4 +1,5 @@
 using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Scheduling;
 using ErsatzTV.Core.Interfaces.Scripting;
 using ErsatzTV.Core.Scheduling;
@@ -8,26 +9,33 @@ namespace ErsatzTV.Infrastructure.Scheduling;
 
 public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerator
 {
+    private readonly CancellationToken _cancellationToken;
     private readonly ILogger _logger;
     private readonly int _mediaItemCount;
     private readonly Dictionary<int, List<MediaItem>> _mediaItemGroups;
     private readonly List<MediaItem> _ungrouped;
     private CloneableRandom _random;
     private IList<MediaItem> _shuffled;
+    private readonly Lazy<Option<TimeSpan>> _lazyMinimumDuration;
 
     public MultiEpisodeShuffleCollectionEnumerator(
-        IList<MediaItem> mediaItems,
+        ICollection<MediaItem> mediaItems,
         CollectionEnumeratorState state,
         IScriptEngine scriptEngine,
         string scriptFile,
-        ILogger logger)
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         _logger = logger;
+        _cancellationToken = cancellationToken;
 
-        scriptEngine.Load(scriptFile);
+        if (!string.IsNullOrWhiteSpace(scriptFile))
+        {
+            scriptEngine.Load(scriptFile);
+        }
 
         var numParts = (int)(double)scriptEngine.GetValue("numParts");
-        
+
         _mediaItemGroups = new Dictionary<int, List<MediaItem>>();
         for (var i = 1; i <= numParts; i++)
         {
@@ -36,7 +44,7 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
 
         _ungrouped = new List<MediaItem>();
         _mediaItemCount = mediaItems.Count;
-        
+
         IList<Episode> validEpisodes = mediaItems
             .OfType<Episode>()
             .Filter(e => e.Season is not null && e.EpisodeMetadata is not null && e.EpisodeMetadata.Count == 1)
@@ -46,7 +54,7 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
             // prep script params
             int seasonNumber = episode.Season.SeasonNumber;
             int episodeNumber = episode.EpisodeMetadata[0].EpisodeNumber;
-            
+
             // call the script function, and if we get a part (group) number back, use it
             if (scriptEngine.Invoke("partNumberForEpisode", seasonNumber, episodeNumber) is double result)
             {
@@ -69,12 +77,26 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
 
         _random = new CloneableRandom(state.Seed);
         _shuffled = Shuffle(_random);
+        _lazyMinimumDuration =
+            new Lazy<Option<TimeSpan>>(() => _shuffled.Bind(i => i.GetDuration()).OrderBy(identity).HeadOrNone());
 
         State = new CollectionEnumeratorState { Seed = state.Seed };
         while (State.Index < state.Index)
         {
             MoveNext();
         }
+    }
+
+    public void ResetState(CollectionEnumeratorState state)
+    {
+        // only re-shuffle if needed
+        if (State.Seed != state.Seed)
+        {
+            _random = new CloneableRandom(state.Seed);
+            _shuffled = Shuffle(_random);
+        }
+
+        State.Index = state.Index;
     }
 
     public CollectionEnumeratorState State { get; }
@@ -93,7 +115,8 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
                 State.Seed = _random.Next();
                 _random = new CloneableRandom(State.Seed);
                 _shuffled = Shuffle(_random);
-            } while (_mediaItemCount > 1 && Current.Map(x => x.Id) == tail.Map(x => x.Id));
+            } while (!_cancellationToken.IsCancellationRequested && _mediaItemCount > 1 &&
+                     Current.Map(x => x.Id) == tail.Map(x => x.Id));
         }
         else
         {
@@ -101,34 +124,6 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
         }
 
         State.Index %= _mediaItemCount;
-    }
-
-    public Option<MediaItem> Peek(int offset)
-    {
-        if (offset == 0)
-        {
-            return Current;
-        }
-
-        if ((State.Index + offset) % _mediaItemCount == 0)
-        {
-            IList<MediaItem> shuffled;
-            Option<MediaItem> tail = Current;
-
-            // clone the random
-            CloneableRandom randomCopy = _random.Clone();
-
-            do
-            {
-                int newSeed = randomCopy.Next();
-                randomCopy = new CloneableRandom(newSeed);
-                shuffled = Shuffle(randomCopy);
-            } while (_mediaItemCount > 1 && shuffled[0] == tail);
-
-            return shuffled.Any() ? shuffled[0] : None;
-        }
-
-        return _shuffled.Any() ? _shuffled[(State.Index + offset) % _mediaItemCount] : None;
     }
 
     private IList<MediaItem> Shuffle(CloneableRandom random)
@@ -178,7 +173,7 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
         // flatten
         return GroupedMediaItem.FlattenGroups(copy, _mediaItemCount);
     }
-    
+
     private static IList<MediaItem> Shuffle(IEnumerable<MediaItem> mediaItems, CloneableRandom random)
     {
         MediaItem[] copy = mediaItems.ToArray();
@@ -193,4 +188,8 @@ public class MultiEpisodeShuffleCollectionEnumerator : IMediaCollectionEnumerato
 
         return copy;
     }
+
+    public Option<TimeSpan> MinimumDuration => _lazyMinimumDuration.Value;
+    
+    public int Count => _shuffled.Count;
 }

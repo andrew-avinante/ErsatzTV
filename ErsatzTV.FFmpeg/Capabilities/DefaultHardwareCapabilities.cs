@@ -4,7 +4,10 @@ namespace ErsatzTV.FFmpeg.Capabilities;
 
 public class DefaultHardwareCapabilities : IHardwareCapabilities
 {
-    public FFmpegCapability CanDecode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
+    public FFmpegCapability CanDecode(
+        string videoFormat,
+        Option<string> videoProfile,
+        Option<IPixelFormat> maybePixelFormat)
     {
         int bitDepth = maybePixelFormat.Map(pf => pf.BitDepth).IfNone(8);
 
@@ -17,7 +20,10 @@ public class DefaultHardwareCapabilities : IHardwareCapabilities
         };
     }
 
-    public FFmpegCapability CanEncode(string videoFormat, Option<string> videoProfile, Option<IPixelFormat> maybePixelFormat)
+    public FFmpegCapability CanEncode(
+        string videoFormat,
+        Option<string> videoProfile,
+        Option<IPixelFormat> maybePixelFormat)
     {
         int bitDepth = maybePixelFormat.Map(pf => pf.BitDepth).IfNone(8);
 
@@ -29,4 +35,7 @@ public class DefaultHardwareCapabilities : IHardwareCapabilities
             _ => FFmpegCapability.Hardware
         };
     }
+    
+    public Option<RateControlMode> GetRateControlMode(string videoFormat, Option<IPixelFormat> maybePixelFormat) =>
+        Option<RateControlMode>.None;
 }

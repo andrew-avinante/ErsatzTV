@@ -19,7 +19,8 @@ public class PlayoutModeSchedulerMultiple : PlayoutModeSchedulerBase<ProgramSche
         Dictionary<CollectionKey, IMediaCollectionEnumerator> collectionEnumerators,
         ProgramScheduleItemMultiple scheduleItem,
         ProgramScheduleItem nextScheduleItem,
-        DateTimeOffset hardStop)
+        DateTimeOffset hardStop,
+        CancellationToken cancellationToken)
     {
         var playoutItems = new List<PlayoutItem>();
 
@@ -76,19 +77,20 @@ public class PlayoutModeSchedulerMultiple : PlayoutModeSchedulerBase<ProgramSche
             };
 
             // LogScheduledItem(scheduleItem, mediaItem, itemStartTime);
-            DateTimeOffset itemEndTimeWithFiller = CalculateEndTimeWithFiller(
-                collectionEnumerators,
-                scheduleItem,
-                itemStartTime,
-                itemDuration,
-                itemChapters);
 
             playoutItems.AddRange(
-                AddFiller(nextState, collectionEnumerators, scheduleItem, playoutItem, itemChapters));
+                AddFiller(
+                    nextState,
+                    collectionEnumerators,
+                    scheduleItem,
+                    playoutItem,
+                    itemChapters,
+                    log: true,
+                    cancellationToken));
 
             nextState = nextState with
             {
-                CurrentTime = itemEndTimeWithFiller,
+                CurrentTime = playoutItems.Max(pi => pi.FinishOffset),
                 MultipleRemaining = nextState.MultipleRemaining.Map(i => i - 1),
 
                 // only bump guide group if we don't have a custom title
@@ -128,7 +130,8 @@ public class PlayoutModeSchedulerMultiple : PlayoutModeSchedulerBase<ProgramSche
                 collectionEnumerators,
                 scheduleItem,
                 playoutItems,
-                nextItemStart);
+                nextItemStart,
+                cancellationToken);
         }
 
         if (scheduleItem.FallbackFiller != null)
@@ -138,7 +141,8 @@ public class PlayoutModeSchedulerMultiple : PlayoutModeSchedulerBase<ProgramSche
                 collectionEnumerators,
                 scheduleItem,
                 playoutItems,
-                nextItemStart);
+                nextItemStart,
+                cancellationToken);
         }
 
         nextState = nextState with { NextGuideGroup = nextState.IncrementGuideGroup };

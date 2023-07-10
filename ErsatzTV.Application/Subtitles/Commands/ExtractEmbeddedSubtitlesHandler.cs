@@ -9,6 +9,7 @@ using ErsatzTV.Application.Maintenance;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Extensions;
+using ErsatzTV.Core.Interfaces.Locking;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Extensions;
@@ -20,18 +21,21 @@ namespace ErsatzTV.Application.Subtitles;
 public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSubtitles, Either<BaseError, Unit>>
 {
     private readonly IDbContextFactory<TvContext> _dbContextFactory;
-    private readonly ChannelWriter<IBackgroundServiceRequest> _workerChannel;
     private readonly ILocalFileSystem _localFileSystem;
+    private readonly IEntityLocker _entityLocker;
     private readonly ILogger<ExtractEmbeddedSubtitlesHandler> _logger;
+    private readonly ChannelWriter<IBackgroundServiceRequest> _workerChannel;
 
     public ExtractEmbeddedSubtitlesHandler(
         IDbContextFactory<TvContext> dbContextFactory,
         ILocalFileSystem localFileSystem,
+        IEntityLocker entityLocker,
         ChannelWriter<IBackgroundServiceRequest> workerChannel,
         ILogger<ExtractEmbeddedSubtitlesHandler> logger)
     {
         _dbContextFactory = dbContextFactory;
         _localFileSystem = localFileSystem;
+        _entityLocker = entityLocker;
         _workerChannel = workerChannel;
         _logger = logger;
     }
@@ -70,7 +74,7 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 .AsNoTracking()
                 .Filter(
                     p => p.Channel.SubtitleMode != ChannelSubtitleMode.None ||
-                         p.ProgramSchedule.Items.Any(psi => psi.SubtitleMode != ChannelSubtitleMode.None))
+                         p.ProgramSchedule.Items.Any(psi => psi.SubtitleMode != null && psi.SubtitleMode != ChannelSubtitleMode.None))
                 .SelectOneAsync(p => p.Id, p => p.Id == request.PlayoutId.IfNone(-1));
 
             playoutIdsToCheck.AddRange(requestedPlayout.Map(p => p.Id));
@@ -82,7 +86,7 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                     .AsNoTracking()
                     .Filter(
                         p => p.Channel.SubtitleMode != ChannelSubtitleMode.None ||
-                             p.ProgramSchedule.Items.Any(psi => psi.SubtitleMode != ChannelSubtitleMode.None))
+                             p.ProgramSchedule.Items.Any(psi => psi.SubtitleMode != null && psi.SubtitleMode != ChannelSubtitleMode.None))
                     .Map(p => p.Id)
                     .ToList();
             }
@@ -101,6 +105,11 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 return Unit.Default;
             }
 
+            foreach (int playoutId in playoutIdsToCheck)
+            {
+                _entityLocker.LockPlayout(playoutId);
+            }
+            
             _logger.LogDebug("Checking playouts {PlayoutIds} for text subtitles to extract", playoutIdsToCheck);
 
             // find all playout items in the next hour
@@ -154,6 +163,11 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
 
             _logger.LogDebug("Done checking playouts {PlayoutIds} for text subtitles to extract", playoutIdsToCheck);
 
+            foreach (int playoutId in playoutIdsToCheck)
+            {
+                _entityLocker.UnlockPlayout(playoutId);
+            }
+            
             return Unit.Default;
         }
         catch (Exception ex) when (ex is TaskCanceledException or OperationCanceledException)
@@ -177,7 +191,8 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 .Filter(
                     em => em.Subtitles.Any(
                         s => s.SubtitleKind == SubtitleKind.Embedded &&
-                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" && s.Codec != "vobsub" && s.Codec != "pgssub"))
+                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" &&
+                             s.Codec != "vobsub" && s.Codec != "pgssub" && s.Codec != "pgs"))
                 .Map(em => em.EpisodeId)
                 .ToListAsync(cancellationToken);
             result.AddRange(episodeIds);
@@ -188,7 +203,8 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 .Filter(
                     mm => mm.Subtitles.Any(
                         s => s.SubtitleKind == SubtitleKind.Embedded &&
-                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" && s.Codec != "vobsub" && s.Codec != "pgssub"))
+                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" &&
+                             s.Codec != "vobsub" && s.Codec != "pgssub" && s.Codec != "pgs"))
                 .Map(mm => mm.MovieId)
                 .ToListAsync(cancellationToken);
             result.AddRange(movieIds);
@@ -199,7 +215,8 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 .Filter(
                     mm => mm.Subtitles.Any(
                         s => s.SubtitleKind == SubtitleKind.Embedded &&
-                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" && s.Codec != "vobsub" && s.Codec != "pgssub"))
+                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" &&
+                             s.Codec != "vobsub" && s.Codec != "pgssub" && s.Codec != "pgs"))
                 .Map(mm => mm.MusicVideoId)
                 .ToListAsync(cancellationToken);
             result.AddRange(musicVideoIds);
@@ -210,7 +227,8 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
                 .Filter(
                     ovm => ovm.Subtitles.Any(
                         s => s.SubtitleKind == SubtitleKind.Embedded &&
-                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" && s.Codec != "vobsub" && s.Codec != "pgssub"))
+                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" &&
+                             s.Codec != "vobsub" && s.Codec != "pgssub" && s.Codec != "pgs"))
                 .Map(ovm => ovm.OtherVideoId)
                 .ToListAsync(cancellationToken);
             result.AddRange(otherVideoIds);
@@ -237,9 +255,11 @@ public class ExtractEmbeddedSubtitlesHandler : IRequestHandler<ExtractEmbeddedSu
 
                 // find each subtitle that needs extraction
                 IEnumerable<Subtitle> subtitles = allSubtitles
+                    .Filter(s => s.SubtitleKind == SubtitleKind.Embedded)
                     .Filter(
-                        s => s.SubtitleKind == SubtitleKind.Embedded && s.IsExtracted == false &&
-                             s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" && s.Codec != "vobsub" && s.Codec != "pgssub");
+                        s => s.Codec != "hdmv_pgs_subtitle" && s.Codec != "dvd_subtitle" && s.Codec != "dvdsub" &&
+                             s.Codec != "vobsub" && s.Codec != "pgssub" && s.Codec != "pgs")
+                    .Filter(s => s.IsExtracted == false || string.IsNullOrWhiteSpace(s.Path));
 
                 // find cache paths for each subtitle
                 foreach (Subtitle subtitle in subtitles)

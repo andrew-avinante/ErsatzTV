@@ -29,6 +29,8 @@ public class WorkerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
+        await Task.Yield();
+        
         try
         {
             _logger.LogInformation("Worker service started");
@@ -55,9 +57,13 @@ public class WorkerService : BackgroundService
                             await mediator.Send(refreshChannelData, cancellationToken);
                             break;
                         case BuildPlayout buildPlayout:
+                            var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+                            var linkedTokenSource =
+                                CancellationTokenSource.CreateLinkedTokenSource(cts.Token, cancellationToken);
+
                             Either<BaseError, Unit> buildPlayoutResult = await mediator.Send(
                                 buildPlayout,
-                                cancellationToken);
+                                linkedTokenSource.Token);
                             buildPlayoutResult.BiIter(
                                 _ => _logger.LogDebug("Built playout {PlayoutId}", buildPlayout.PlayoutId),
                                 error => _logger.LogWarning(

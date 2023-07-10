@@ -80,6 +80,8 @@ public class PipelineBuilderBaseTests
             Option<string>.None,
             Option<string>.None,
             Option<string>.None,
+            Option<string>.None,
+            Option<string>.None,
             OutputFormatKind.MpegTs,
             Option<string>.None,
             Option<string>.None,
@@ -166,6 +168,8 @@ public class PipelineBuilderBaseTests
             Option<string>.None,
             Option<string>.None,
             Option<string>.None,
+            Option<string>.None,
+            Option<string>.None,
             OutputFormatKind.MpegTs,
             Option<string>.None,
             Option<string>.None,
@@ -218,12 +222,14 @@ public class PipelineBuilderBaseTests
         command.Should().Be(
             "-nostdin -hide_banner -nostats -loglevel error -fflags +genpts+discardcorrupt+igndts -f concat -safe 0 -protocol_whitelist file,http,tcp,https,tcp,tls -probesize 32 -re -stream_loop -1 -i http://localhost:8080/ffmpeg/concat/1 -muxdelay 0 -muxpreload 0 -movflags +faststart -flags cgop -sc_threshold 0 -c copy -map_metadata -1 -metadata service_provider=\"ErsatzTV\" -metadata service_name=\"Some Channel\" -f mpegts -mpegts_flags +initial_discontinuity pipe:1");
     }
-    
+
     [Test]
     public void Wrap_Segmenter_Test()
     {
         var resolution = new FrameSize(1920, 1080);
-        var concatInputFile = new ConcatInputFile("http://localhost:8080/iptv/channel/1.m3u8?mode=segmenter", resolution);
+        var concatInputFile = new ConcatInputFile(
+            "http://localhost:8080/iptv/channel/1.m3u8?mode=segmenter",
+            resolution);
 
         var builder = new SoftwarePipelineBuilder(
             new DefaultFFmpegCapabilities(),
@@ -304,7 +310,9 @@ public class PipelineBuilderBaseTests
             Option<string>.None,
             Option<string>.None,
             Option<string>.None,
-            OutputFormatKind.MpegTs,
+            Option<string>.None,
+            Option<string>.None,
+            OutputFormatKind.Mp4,
             Option<string>.None,
             Option<string>.None,
             0,
@@ -332,7 +340,7 @@ public class PipelineBuilderBaseTests
 
         // 0.4.0 reference: "-nostdin -threads 1 -hide_banner -loglevel error -nostats -fflags +genpts+discardcorrupt+igndts -re -ss 00:14:33.6195516 -i /tmp/whatever.mkv -map 0:0 -map 0:a -c:v copy -flags cgop -sc_threshold 0 -c:a copy -movflags +faststart -muxdelay 0 -muxpreload 0 -metadata service_provider="ErsatzTV" -metadata service_name="ErsatzTV" -t 00:06:39.6934484 -f mpegts -mpegts_flags +initial_discontinuity pipe:1"
         command.Should().Be(
-            "-nostdin -hide_banner -nostats -loglevel error -fflags +genpts+discardcorrupt+igndts -re -i /tmp/whatever.mkv -map 0:1 -map 0:0 -muxdelay 0 -muxpreload 0 -movflags +faststart -flags cgop -sc_threshold 0 -c:v copy -c:a copy -f mpegts -mpegts_flags +initial_discontinuity pipe:1");
+            "-nostdin -hide_banner -nostats -loglevel error -fflags +genpts+discardcorrupt+igndts -re -i /tmp/whatever.mkv -map 0:1 -map 0:0 -muxdelay 0 -muxpreload 0 -movflags +faststart+frag_keyframe+separate_moof+omit_tfhd_offset+empty_moov+delay_moov -flags cgop -sc_threshold 0 -c:v copy -c:a copy -f mp4 pipe:1");
     }
 
     [Test]
@@ -384,7 +392,9 @@ public class PipelineBuilderBaseTests
             Option<string>.None,
             Option<string>.None,
             Option<string>.None,
-            OutputFormatKind.MpegTs,
+            Option<string>.None,
+            Option<string>.None,
+            OutputFormatKind.Mp4,
             Option<string>.None,
             Option<string>.None,
             0,
@@ -410,7 +420,7 @@ public class PipelineBuilderBaseTests
         string command = PrintCommand(videoInputFile, audioInputFile, None, None, result);
 
         command.Should().Be(
-            "-nostdin -hide_banner -nostats -loglevel error -fflags +genpts+discardcorrupt+igndts -re -i /tmp/whatever.mkv -map 0:a -map 0:0 -muxdelay 0 -muxpreload 0 -movflags +faststart -flags cgop -sc_threshold 0 -c:v copy -c:a copy -f mpegts -mpegts_flags +initial_discontinuity pipe:1");
+            "-nostdin -hide_banner -nostats -loglevel error -fflags +genpts+discardcorrupt+igndts -re -i /tmp/whatever.mkv -map 0:a -map 0:0 -muxdelay 0 -muxpreload 0 -movflags +faststart+frag_keyframe+separate_moof+omit_tfhd_offset+empty_moov+delay_moov -flags cgop -sc_threshold 0 -c:v copy -c:a copy -f mp4 pipe:1");
     }
 
     [Test]
@@ -474,7 +484,7 @@ public class PipelineBuilderBaseTests
 
         return command;
     }
-    
+
     public class DefaultFFmpegCapabilities : FFmpegCapabilities
     {
         public DefaultFFmpegCapabilities()

@@ -3,9 +3,9 @@
 @using ErsatzTV.Application.MediaCollections
 @using ErsatzTV.Application.MediaItems
 @using ErsatzTV.Application.Television
-@using ErsatzTV.Core.Domain.Filler
 @using ErsatzTV.Application.Artists
 @using ErsatzTV.Application.Filler
+@using ErsatzTV.Core.Domain.Filler
 @implements IDisposable
 @inject NavigationManager _navigationManager
 @inject ILogger<FillerPresetEditor> _logger
@@ -17,7 +17,7 @@
         <MudText Typo="Typo.h4" Class="mb-4">@(IsEdit ? "Edit Filler Preset" : "Add Filler Preset")</MudText>
 
         <EditForm EditContext="_editContext" OnSubmit="@HandleSubmitAsync">
-            <FluentValidator/>
+            <FluentValidationValidator/>
             <MudCard>
                 <MudCardContent>
                     <MudTextField Class="mt-3" Label="Name" @bind-Value="_model.Name" For="@(() => _model.Name)"/>

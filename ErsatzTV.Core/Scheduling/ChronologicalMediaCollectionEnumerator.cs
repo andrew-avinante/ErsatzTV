@@ -1,4 +1,5 @@
 ﻿using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Scheduling;
 
 namespace ErsatzTV.Core.Scheduling;
@@ -6,12 +7,15 @@ namespace ErsatzTV.Core.Scheduling;
 public sealed class ChronologicalMediaCollectionEnumerator : IMediaCollectionEnumerator
 {
     private readonly IList<MediaItem> _sortedMediaItems;
+    private readonly Lazy<Option<TimeSpan>> _lazyMinimumDuration;
 
     public ChronologicalMediaCollectionEnumerator(
         IEnumerable<MediaItem> mediaItems,
         CollectionEnumeratorState state)
     {
         _sortedMediaItems = mediaItems.OrderBy(identity, new ChronologicalMediaComparer()).ToList();
+        _lazyMinimumDuration = new Lazy<Option<TimeSpan>>(
+            () => _sortedMediaItems.Bind(i => i.GetDuration()).OrderBy(identity).HeadOrNone());
 
         State = new CollectionEnumeratorState { Seed = state.Seed };
 
@@ -27,12 +31,19 @@ public sealed class ChronologicalMediaCollectionEnumerator : IMediaCollectionEnu
         }
     }
 
+    public void ResetState(CollectionEnumeratorState state)
+    {
+        // seed doesn't matter in chronological
+        State.Index = state.Index;
+    }
+
     public CollectionEnumeratorState State { get; }
 
     public Option<MediaItem> Current => _sortedMediaItems.Any() ? _sortedMediaItems[State.Index] : None;
 
     public void MoveNext() => State.Index = (State.Index + 1) % _sortedMediaItems.Count;
 
-    public Option<MediaItem> Peek(int offset) =>
-        _sortedMediaItems.Any() ? _sortedMediaItems[(State.Index + offset) % _sortedMediaItems.Count] : None;
+    public Option<TimeSpan> MinimumDuration => _lazyMinimumDuration.Value;
+
+    public int Count => _sortedMediaItems.Count;
 }

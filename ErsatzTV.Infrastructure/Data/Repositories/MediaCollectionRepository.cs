@@ -13,8 +13,8 @@ namespace ErsatzTV.Infrastructure.Data.Repositories;
 
 public class MediaCollectionRepository : IMediaCollectionRepository
 {
-    private readonly IDbContextFactory<TvContext> _dbContextFactory;
     private readonly IClient _client;
+    private readonly IDbContextFactory<TvContext> _dbContextFactory;
     private readonly ISearchIndex _searchIndex;
 
     public MediaCollectionRepository(
@@ -437,7 +437,7 @@ public class MediaCollectionRepository : IMediaCollectionRepository
                 PlaybackOrder.Chronological,
                 false));
 
-        return result;
+        return result.Filter(c => c.MediaItems.Any()).ToList();
     }
 
     private async Task<List<Movie>> GetMovieItems(TvContext dbContext, int collectionId)

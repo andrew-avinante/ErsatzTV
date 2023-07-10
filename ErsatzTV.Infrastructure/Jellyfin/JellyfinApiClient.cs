@@ -831,7 +831,7 @@ public class JellyfinApiClient : IJellyfinApiClient
             Genres = Optional(item.Genres).Flatten().Map(g => new Genre { Name = g }).ToList(),
             Tags = Optional(item.Tags).Flatten().Map(t => new Tag { Name = t }).ToList(),
             Studios = new List<Studio>(),
-            Actors = new List<Actor>(),
+            Actors = Optional(item.People).Flatten().Collect(r => ProjectToActor(r, dateAdded)).ToList(),
             Artwork = new List<Artwork>(),
             Guids = GuidsFromProviderIds(item.ProviderIds),
             Directors = Optional(item.People).Flatten().Collect(r => ProjectToDirector(r)).ToList(),
@@ -887,7 +887,7 @@ public class JellyfinApiClient : IJellyfinApiClient
 
         return result;
     }
-    
+
     private Option<MediaVersion> ProjectToMediaVersion(JellyfinPlaybackInfoResponse response)
     {
         if (response.MediaSources is null || response.MediaSources.Count == 0)
@@ -897,7 +897,7 @@ public class JellyfinApiClient : IJellyfinApiClient
         }
 
         JellyfinMediaSourceResponse mediaSource = response.MediaSources.Head();
-        
+
         // jellyfin includes external streams first, obscuring real stream indexes
         // from the source file
         int streamIndexOffset = mediaSource.MediaStreams
@@ -905,7 +905,7 @@ public class JellyfinApiClient : IJellyfinApiClient
             .Map(s => s.Index + 1)
             .OrderByDescending(i => i)
             .FirstOrDefault();
-        
+
         IList<JellyfinMediaStreamResponse> streams = mediaSource.MediaStreams;
 
         Option<JellyfinMediaStreamResponse> maybeVideoStream =
@@ -915,7 +915,7 @@ public class JellyfinApiClient : IJellyfinApiClient
             {
                 int width = videoStream.Width ?? 1;
                 int height = videoStream.Height ?? 1;
-                
+
                 var isAnamorphic = false;
                 if (videoStream.IsAnamorphic.HasValue)
                 {
@@ -925,7 +925,7 @@ public class JellyfinApiClient : IJellyfinApiClient
                 {
                     // if width/height != aspect ratio, is anamorphic
                     double resolutionRatio = width / (double)height;
-                    
+
                     string[] split = videoStream.AspectRatio.Split(":");
                     var num = double.Parse(split[0]);
                     var den = double.Parse(split[1]);

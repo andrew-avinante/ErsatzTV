@@ -2,6 +2,7 @@
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Domain.Filler;
 using ErsatzTV.Core.Interfaces.FFmpeg;
+using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.FFmpeg;
 using ErsatzTV.FFmpeg.Environment;
 using ErsatzTV.FFmpeg.Format;
@@ -18,9 +19,10 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
     private readonly FFmpegProcessService _ffmpegProcessService;
     private readonly IFFmpegStreamSelector _ffmpegStreamSelector;
     private readonly ILogger<FFmpegLibraryProcessService> _logger;
+    private readonly IPipelineBuilderFactory _pipelineBuilderFactory;
+    private readonly IConfigElementRepository _configElementRepository;
     private readonly FFmpegPlaybackSettingsCalculator _playbackSettingsCalculator;
     private readonly ITempFilePool _tempFilePool;
-    private readonly IPipelineBuilderFactory _pipelineBuilderFactory;
 
     public FFmpegLibraryProcessService(
         FFmpegProcessService ffmpegProcessService,
@@ -28,6 +30,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         IFFmpegStreamSelector ffmpegStreamSelector,
         ITempFilePool tempFilePool,
         IPipelineBuilderFactory pipelineBuilderFactory,
+        IConfigElementRepository configElementRepository,
         ILogger<FFmpegLibraryProcessService> logger)
     {
         _ffmpegProcessService = ffmpegProcessService;
@@ -35,6 +38,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         _ffmpegStreamSelector = ffmpegStreamSelector;
         _tempFilePool = tempFilePool;
         _pipelineBuilderFactory = pipelineBuilderFactory;
+        _configElementRepository = configElementRepository;
         _logger = logger;
     }
 
@@ -91,9 +95,11 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             hlsRealtime,
             targetFramerate);
 
+        var allSubtitles = await getSubtitles(playbackSettings);
+        
         Option<Subtitle> maybeSubtitle =
             await _ffmpegStreamSelector.SelectSubtitleStream(
-                await getSubtitles(playbackSettings),
+                allSubtitles,
                 channel,
                 preferredSubtitleLanguage,
                 subtitleMode);
@@ -154,7 +160,8 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             videoPath != audioPath || channel.StreamingMode == StreamingMode.HttpLiveStreamingDirect;
         ILogger<FFmpegLibraryProcessService> pixelFormatLogger = isUnknownPixelFormatExpected ? null : _logger;
 
-        IPixelFormat pixelFormat = await AvailablePixelFormats.ForPixelFormat(videoStream.PixelFormat, pixelFormatLogger)
+        IPixelFormat pixelFormat = await AvailablePixelFormats
+            .ForPixelFormat(videoStream.PixelFormat, pixelFormatLogger)
             .IfNoneAsync(
                 () =>
                 {
@@ -165,7 +172,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                         _ => new PixelFormatUnknown(videoStream.BitsPerRawSample)
                     };
                 });
-        
+
         var ffmpegVideoStream = new VideoStream(
             videoStream.Index,
             videoStream.Codec,
@@ -191,6 +198,32 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                 return new AudioInputFile(audioPath, new List<AudioStream> { ffmpegAudioStream }, audioState);
             });
 
+        OutputFormatKind outputFormat = OutputFormatKind.MpegTs;
+        switch (channel.StreamingMode)
+        {
+            case StreamingMode.HttpLiveStreamingSegmenter:
+                outputFormat = OutputFormatKind.Hls;
+                break;
+            case StreamingMode.HttpLiveStreamingDirect:
+            {
+                // use mpeg-ts by default
+                outputFormat = OutputFormatKind.MpegTs;
+            
+                // override with setting if applicable
+                Option<OutputFormatKind> maybeOutputFormat = await _configElementRepository
+                    .GetValue<OutputFormatKind>(ConfigElementKey.FFmpegHlsDirectOutputFormat);
+                foreach (OutputFormatKind of in maybeOutputFormat)
+                {
+                    outputFormat = of;
+                }
+
+                break;
+            }
+        }
+
+        Option<string> subtitleLanguage = Option<string>.None;
+        Option<string> subtitleTitle = Option<string>.None;
+
         Option<SubtitleInputFile> subtitleInputFile = maybeSubtitle.Map<Option<SubtitleInputFile>>(
             subtitle =>
             {
@@ -212,24 +245,56 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                     _ => Path.Combine(FileSystemLayout.SubtitleCacheFolder, subtitle.Path)
                 };
 
+                SubtitleMethod method = SubtitleMethod.Burn;
+                if (channel.StreamingMode == StreamingMode.HttpLiveStreamingDirect)
+                {
+                    method = (outputFormat, subtitle.SubtitleKind, subtitle.Codec) switch
+                    {
+                        // mkv supports all subtitle codecs, maybe?
+                        (OutputFormatKind.Mkv, SubtitleKind.Embedded, _) => SubtitleMethod.Copy,
+
+                        // MP4 supports vobsub
+                        (OutputFormatKind.Mp4, SubtitleKind.Embedded, "dvdsub" or "dvd_subtitle" or "vobsub") =>
+                            SubtitleMethod.Copy,
+
+                        // MP4 does not support PGS
+                        (OutputFormatKind.Mp4, SubtitleKind.Embedded, "pgs" or "pgssub" or "hdmv_pgs_subtitle") =>
+                            SubtitleMethod.None,
+
+                        // ignore text subtitles for now
+                        _ => SubtitleMethod.None
+                    };
+
+                    if (method == SubtitleMethod.None)
+                    {
+                        return None;
+                    }
+                    
+                    // hls direct won't use extracted embedded subtitles
+                    if (subtitle.SubtitleKind == SubtitleKind.Embedded)
+                    {
+                        path = videoPath;
+                        ffmpegSubtitleStream = ffmpegSubtitleStream with { Index = subtitle.StreamIndex };
+                    }
+                }
+
+                if (method == SubtitleMethod.Copy)
+                {
+                    subtitleLanguage = Optional(subtitle.Language);
+                    subtitleTitle = Optional(subtitle.Title);
+                }
+
                 return new SubtitleInputFile(
                     path,
                     new List<ErsatzTV.FFmpeg.MediaStream> { ffmpegSubtitleStream },
-                    false);
-
-                // TODO: figure out HLS direct
-                // channel.StreamingMode == StreamingMode.HttpLiveStreamingDirect);
+                    method);
             }).Flatten();
 
         Option<WatermarkInputFile> watermarkInputFile = GetWatermarkInputFile(watermarkOptions, maybeFadePoints);
 
         string videoFormat = GetVideoFormat(playbackSettings);
 
-        HardwareAccelerationMode hwAccel = GetHardwareAccelerationMode(playbackSettings);
-
-        OutputFormatKind outputFormat = channel.StreamingMode == StreamingMode.HttpLiveStreamingSegmenter
-            ? OutputFormatKind.Hls
-            : OutputFormatKind.MpegTs;
+        HardwareAccelerationMode hwAccel = GetHardwareAccelerationMode(playbackSettings, fillerKind);
 
         Option<string> hlsPlaylistPath = outputFormat == OutputFormatKind.Hls
             ? Path.Combine(FileSystemLayout.TranscodeFolder, channel.Number, "live.m3u8")
@@ -267,6 +332,8 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             "ErsatzTV",
             channel.Name,
             maybeAudioStream.Map(s => Optional(s.Language)).Flatten(),
+            subtitleLanguage,
+            subtitleTitle,
             outputFormat,
             hlsPlaylistPath,
             hlsSegmentTemplate,
@@ -386,7 +453,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
 
         var videoInputFile = new VideoInputFile(videoPath, new List<VideoStream> { ffmpegVideoStream });
 
-        HardwareAccelerationMode hwAccel = GetHardwareAccelerationMode(playbackSettings);
+        HardwareAccelerationMode hwAccel = GetHardwareAccelerationMode(playbackSettings, FillerKind.None);
 
         var ffmpegState = new FFmpegState(
             false,
@@ -399,6 +466,8 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             channel.StreamingMode != StreamingMode.HttpLiveStreamingDirect,
             "ErsatzTV",
             channel.Name,
+            None,
+            None,
             None,
             outputFormat,
             hlsPlaylistPath,
@@ -414,7 +483,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         var subtitleInputFile = new SubtitleInputFile(
             subtitleFile,
             new List<ErsatzTV.FFmpeg.MediaStream> { ffmpegSubtitleStream },
-            false);
+            SubtitleMethod.Burn);
 
         _logger.LogDebug("FFmpeg desired error state {FrameState}", desiredState);
 
@@ -429,7 +498,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             FileSystemLayout.FFmpegReportsFolder,
             FileSystemLayout.FontsCacheFolder,
             ffmpegPath);
-        
+
         FFmpegPipeline pipeline = pipelineBuilder.Build(ffmpegState, desiredState);
 
         return GetCommand(ffmpegPath, videoInputFile, audioInputFile, None, None, pipeline);
@@ -459,7 +528,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             FileSystemLayout.FFmpegReportsFolder,
             FileSystemLayout.FontsCacheFolder,
             ffmpegPath);
-        
+
         FFmpegPipeline pipeline = pipelineBuilder.Concat(
             concatInputFile,
             FFmpegState.Concat(saveReports, channel.Name));
@@ -716,9 +785,12 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             _ => throw new ArgumentOutOfRangeException($"unexpected video format {playbackSettings.VideoFormat}")
         };
 
-    private static HardwareAccelerationMode GetHardwareAccelerationMode(FFmpegPlaybackSettings playbackSettings) =>
+    private static HardwareAccelerationMode GetHardwareAccelerationMode(
+        FFmpegPlaybackSettings playbackSettings,
+        FillerKind fillerKind) =>
         playbackSettings.HardwareAcceleration switch
         {
+            _ when fillerKind == FillerKind.Fallback => HardwareAccelerationMode.None,
             HardwareAccelerationKind.Nvenc => HardwareAccelerationMode.Nvenc,
             HardwareAccelerationKind.Qsv => HardwareAccelerationMode.Qsv,
             HardwareAccelerationKind.Vaapi => HardwareAccelerationMode.Vaapi,

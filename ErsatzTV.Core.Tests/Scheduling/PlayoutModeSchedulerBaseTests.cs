@@ -13,191 +13,18 @@ namespace ErsatzTV.Core.Tests.Scheduling;
 [TestFixture]
 public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
 {
-    [TestFixture]
-    public class CalculateEndTimeWithFiller
+    [SetUp]
+    public void SetUp()
     {
-        [Test]
-        public void Should_Not_Touch_Enumerator()
-        {
-            var collection = new Collection
-            {
-                Id = 1,
-                Name = "Filler Items",
-                MediaItems = new List<MediaItem>()
-            };
-
-            for (var i = 0; i < 5; i++)
-            {
-                collection.MediaItems.Add(TestMovie(i + 1, TimeSpan.FromHours(i + 1), new DateTime(2020, 2, i + 1)));
-            }
-
-            var fillerPreset = new FillerPreset
-            {
-                FillerKind = FillerKind.PreRoll,
-                FillerMode = FillerMode.Count,
-                Count = 3,
-                Collection = collection,
-                CollectionId = collection.Id
-            };
-
-            var enumerator = new ChronologicalMediaCollectionEnumerator(
-                collection.MediaItems,
-                new CollectionEnumeratorState { Index = 0, Seed = 1 });
-
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>
-                    {
-                        { CollectionKey.ForFillerPreset(fillerPreset), enumerator }
-                    },
-                    new ProgramScheduleItemOne
-                    {
-                        PreRollFiller = fillerPreset
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 0, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 18, 12, 30, TimeSpan.FromHours(-5)));
-            enumerator.State.Index.Should().Be(0);
-            enumerator.State.Seed.Should().Be(1);
-        }
-
-        [Test]
-        public void Should_Pad_To_15_Minutes_15()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 15
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 0, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 12, 15, 0, TimeSpan.FromHours(-5)));
-        }
-
-        [Test]
-        public void Should_Pad_To_15_Minutes_30()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 15
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 16, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 12, 30, 0, TimeSpan.FromHours(-5)));
-        }
-
-        [Test]
-        public void Should_Pad_To_15_Minutes_45()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 15
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 30, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 12, 45, 0, TimeSpan.FromHours(-5)));
-        }
-
-        [Test]
-        public void Should_Pad_To_15_Minutes_00()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 15
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 46, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 13, 0, 0, TimeSpan.FromHours(-5)));
-        }
-
-        [Test]
-        public void Should_Pad_To_30_Minutes_30()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 30
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 0, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 12, 30, 0, TimeSpan.FromHours(-5)));
-        }
-
-        [Test]
-        public void Should_Pad_To_30_Minutes_00()
-        {
-            DateTimeOffset result = PlayoutModeSchedulerBase<ProgramScheduleItem>
-                .CalculateEndTimeWithFiller(
-                    new Dictionary<CollectionKey, IMediaCollectionEnumerator>(),
-                    new ProgramScheduleItemOne
-                    {
-                        MidRollFiller = new FillerPreset
-                        {
-                            FillerKind = FillerKind.MidRoll,
-                            FillerMode = FillerMode.Pad,
-                            PadToNearestMinute = 30
-                        }
-                    },
-                    new DateTimeOffset(2020, 2, 1, 12, 20, 0, TimeSpan.FromHours(-5)),
-                    new TimeSpan(0, 12, 30),
-                    new List<MediaChapter>());
-
-            result.Should().Be(new DateTimeOffset(2020, 2, 1, 13, 0, 0, TimeSpan.FromHours(-5)));
-        }
+        _cancellationToken = new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
+        _scheduler = new TestScheduler();
     }
 
+    private CancellationToken _cancellationToken;
+    private PlayoutModeSchedulerBase<ProgramScheduleItem> _scheduler;
+
     [TestFixture]
-    public class AddFiller
+    public class AddFiller : PlayoutModeSchedulerBaseTests
     {
         [Test]
         public void Should_Not_Crash_Mid_Roll_Zero_Chapters()
@@ -224,13 +51,15 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
 
             PlayoutBuilderState startState = StartState(scheduleItemsEnumerator);
 
-            List<PlayoutItem> playoutItems = Scheduler()
+            List<PlayoutItem> playoutItems = _scheduler
                 .AddFiller(
                     startState,
                     CollectionEnumerators(scheduleItem, enumerator),
                     scheduleItem,
                     new PlayoutItem(),
-                    new List<MediaChapter>());
+                    new List<MediaChapter>(),
+                    log: true,
+                    _cancellationToken);
 
             playoutItems.Count.Should().Be(1);
         }
@@ -275,13 +104,15 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             // too lazy to make another enumerator for the filler that we don't want
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.MidRollFiller), enumerator);
 
-            List<PlayoutItem> playoutItems = Scheduler()
+            List<PlayoutItem> playoutItems = _scheduler
                 .AddFiller(
                     startState,
                     enumerators,
                     scheduleItem,
                     new PlayoutItem(),
-                    new List<MediaChapter> { new() });
+                    new List<MediaChapter> { new() },
+                    log: true,
+                    _cancellationToken);
 
             playoutItems.Count.Should().Be(1);
         }
@@ -331,7 +162,7 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
 
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.MidRollFiller), fillerEnumerator);
 
-            List<PlayoutItem> playoutItems = Scheduler()
+            List<PlayoutItem> playoutItems = _scheduler
                 .AddFiller(
                     startState,
                     enumerators,
@@ -346,7 +177,9 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
                     {
                         new() { StartTime = TimeSpan.Zero, EndTime = TimeSpan.FromMinutes(6) },
                         new() { StartTime = TimeSpan.FromMinutes(6), EndTime = TimeSpan.FromMinutes(60) }
-                    });
+                    },
+                    log: true,
+                    _cancellationToken);
 
             playoutItems.Count.Should().Be(3);
             playoutItems[0].MediaItemId.Should().Be(1);
@@ -356,14 +189,14 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             playoutItems[2].MediaItemId.Should().Be(1);
             playoutItems[2].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(11));
         }
-        
+
         [Test]
         public void Should_Schedule_Post_Roll_After_Padded_Mid_Roll()
         {
             // content 45 min, mid roll pad to 60, post roll 5 min
             // content + post = 50 min, mid roll will add two 5 min items
             // content + mid + post = 60 min
-            
+
             Collection collectionOne = TwoItemCollection(1, 2, TimeSpan.FromMinutes(45));
             Collection collectionTwo = TwoItemCollection(3, 4, TimeSpan.FromMinutes(5));
             Collection collectionThree = TwoItemCollection(5, 6, TimeSpan.FromMinutes(5));
@@ -421,7 +254,7 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.MidRollFiller), midRollFillerEnumerator);
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.PostRollFiller), postRollFillerEnumerator);
 
-            List<PlayoutItem> playoutItems = Scheduler()
+            List<PlayoutItem> playoutItems = _scheduler
                 .AddFiller(
                     startState,
                     enumerators,
@@ -436,38 +269,40 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
                     {
                         new() { StartTime = TimeSpan.Zero, EndTime = TimeSpan.FromMinutes(6) },
                         new() { StartTime = TimeSpan.FromMinutes(6), EndTime = TimeSpan.FromMinutes(45) }
-                    });
+                    },
+                    log: true,
+                    _cancellationToken);
 
             playoutItems.Count.Should().Be(5);
-            
+
             // content chapter 1
             playoutItems[0].MediaItemId.Should().Be(1);
             playoutItems[0].StartOffset.Should().Be(startState.CurrentTime);
-            
+
             // mid-roll 1
             playoutItems[1].MediaItemId.Should().Be(3);
             playoutItems[1].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(6));
-            
+
             // mid-roll 2
             playoutItems[2].MediaItemId.Should().Be(4);
             playoutItems[2].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(11));
-            
+
             // content chapter 2
             playoutItems[3].MediaItemId.Should().Be(1);
             playoutItems[3].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(16));
-            
+
             // post-roll
             playoutItems[4].MediaItemId.Should().Be(5);
             playoutItems[4].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(55));
         }
-        
+
         [Test]
         public void Should_Schedule_Padded_Post_Roll_After_Mid_Roll_Count()
         {
             // content 45 min, mid roll 5 min, post roll pad to 60
             // content + mid = 50 min, post roll will add two 5 min items
             // content + mid + post = 60 min
-            
+
             Collection collectionOne = TwoItemCollection(1, 2, TimeSpan.FromMinutes(45));
             Collection collectionTwo = TwoItemCollection(3, 4, TimeSpan.FromMinutes(5));
             Collection collectionThree = TwoItemCollection(5, 6, TimeSpan.FromMinutes(5));
@@ -525,7 +360,7 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.MidRollFiller), midRollFillerEnumerator);
             enumerators.Add(CollectionKey.ForFillerPreset(scheduleItem.PostRollFiller), postRollFillerEnumerator);
 
-            List<PlayoutItem> playoutItems = Scheduler()
+            List<PlayoutItem> playoutItems = _scheduler
                 .AddFiller(
                     startState,
                     enumerators,
@@ -540,18 +375,20 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
                     {
                         new() { StartTime = TimeSpan.Zero, EndTime = TimeSpan.FromMinutes(6) },
                         new() { StartTime = TimeSpan.FromMinutes(6), EndTime = TimeSpan.FromMinutes(45) }
-                    });
+                    },
+                    log: true,
+                    _cancellationToken);
 
             playoutItems.Count.Should().Be(5);
-            
+
             // content chapter 1
             playoutItems[0].MediaItemId.Should().Be(1);
             playoutItems[0].StartOffset.Should().Be(startState.CurrentTime);
-            
+
             // mid-roll 1
             playoutItems[1].MediaItemId.Should().Be(3);
             playoutItems[1].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(6));
-            
+
             // content chapter 2
             playoutItems[2].MediaItemId.Should().Be(1);
             playoutItems[2].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(11));
@@ -559,7 +396,7 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             // post-roll 1
             playoutItems[3].MediaItemId.Should().Be(5);
             playoutItems[3].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(50));
-            
+
             // post-roll 2
             playoutItems[4].MediaItemId.Should().Be(6);
             playoutItems[4].StartOffset.Should().Be(startState.CurrentTime + TimeSpan.FromMinutes(55));
@@ -606,8 +443,6 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             }
         };
 
-    private static PlayoutModeSchedulerBase<ProgramScheduleItem> Scheduler() =>
-        new TestScheduler();
 
     private class TestScheduler : PlayoutModeSchedulerBase<ProgramScheduleItem>
     {
@@ -632,7 +467,8 @@ public class PlayoutModeSchedulerBaseTests : SchedulerTestBase
             Dictionary<CollectionKey, IMediaCollectionEnumerator> collectionEnumerators,
             ProgramScheduleItem scheduleItem,
             ProgramScheduleItem nextScheduleItem,
-            DateTimeOffset hardStop) =>
+            DateTimeOffset hardStop,
+            CancellationToken cancellationToken) =>
             throw new NotSupportedException();
     }
 }

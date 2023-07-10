@@ -85,6 +85,11 @@ public abstract class ProgramScheduleItemCommandBase
                     return BaseError.New("[PlayoutDuration] is required for playout mode 'duration'");
                 }
 
+                if (item.DiscardToFillAttempts is null)
+                {
+                    return BaseError.New("[DiscardToFillAttempts] is required for playout mode 'duration'");
+                }
+
                 if (item.TailMode == TailMode.Filler && item.TailFillerId == null)
                 {
                     return BaseError.New("Tail Filler is required with tail mode Filler");
@@ -256,6 +261,7 @@ public abstract class ProgramScheduleItemCommandBase
                 PlaybackOrder = item.PlaybackOrder,
                 PlayoutDuration = FixDuration(item.PlayoutDuration.GetValueOrDefault()),
                 TailMode = item.TailMode,
+                DiscardToFillAttempts = FixDiscardToFillAttempts(item.PlaybackOrder, item.DiscardToFillAttempts.GetValueOrDefault()),
                 CustomTitle = item.CustomTitle,
                 GuideMode = item.GuideMode,
                 PreRollFillerId = item.PreRollFillerId,
@@ -281,4 +287,10 @@ public abstract class ProgramScheduleItemCommandBase
         startTime.HasValue && startTime.Value >= TimeSpan.FromDays(1)
             ? startTime.Value.Subtract(TimeSpan.FromDays(1))
             : startTime;
+
+    private static int FixDiscardToFillAttempts(PlaybackOrder playbackOrder, int value) => playbackOrder switch
+    {
+        PlaybackOrder.Random or PlaybackOrder.Shuffle => value,
+        _ => 0
+    };
 }

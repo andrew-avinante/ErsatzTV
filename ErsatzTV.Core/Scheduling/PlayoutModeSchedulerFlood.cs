@@ -18,7 +18,8 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
         Dictionary<CollectionKey, IMediaCollectionEnumerator> collectionEnumerators,
         ProgramScheduleItemFlood scheduleItem,
         ProgramScheduleItem nextScheduleItem,
-        DateTimeOffset hardStop)
+        DateTimeOffset hardStop,
+        CancellationToken cancellationToken)
     {
         var playoutItems = new List<PlayoutItem>();
 
@@ -73,12 +74,22 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
                     ? GetStartTimeAfter(nextState with { InFlood = false }, peekScheduleItem)
                     : DateTimeOffset.MaxValue;
 
-            DateTimeOffset itemEndTimeWithFiller = CalculateEndTimeWithFiller(
+            var enumeratorStates = new Dictionary<CollectionKey, CollectionEnumeratorState>();
+            foreach ((CollectionKey key, IMediaCollectionEnumerator enumerator) in collectionEnumerators)
+            {
+                enumeratorStates.Add(key, enumerator.State.Clone());
+            }
+
+            List<PlayoutItem> maybePlayoutItems = AddFiller(
+                nextState,
                 collectionEnumerators,
                 scheduleItem,
-                itemStartTime,
-                itemDuration,
-                itemChapters);
+                playoutItem,
+                itemChapters,
+                log: false,
+                cancellationToken);
+
+            DateTimeOffset itemEndTimeWithFiller = maybePlayoutItems.Max(pi => pi.FinishOffset);
 
             // if the next schedule item is supposed to start during this item,
             // don't schedule this item and just move on
@@ -87,23 +98,8 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
 
             if (willFinishInTime)
             {
-                playoutItems.AddRange(
-                    AddFiller(nextState, collectionEnumerators, scheduleItem, playoutItem, itemChapters));
+                playoutItems.AddRange(maybePlayoutItems);
                 // LogScheduledItem(scheduleItem, mediaItem, itemStartTime);
-
-                if (playoutItems.Count > 0)
-                {
-                    DateTimeOffset actualEndTime = playoutItems.Max(p => p.FinishOffset);
-                    if (Math.Abs((itemEndTimeWithFiller - actualEndTime).TotalSeconds) > 1)
-                    {
-                        _logger.LogWarning(
-                            "Filler prediction failure: predicted {PredictedDuration} doesn't match actual {ActualDuration}",
-                            itemEndTimeWithFiller,
-                            actualEndTime);
-
-                        // _logger.LogWarning("Playout items: {@PlayoutItems}", playoutItems);
-                    }
-                }
 
                 nextState = nextState with
                 {
@@ -117,6 +113,14 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
                 };
 
                 contentEnumerator.MoveNext();
+            }
+            else
+            {
+                // reset enumerators
+                foreach ((CollectionKey key, IMediaCollectionEnumerator enumerator) in collectionEnumerators)
+                {
+                    enumerator.ResetState(enumeratorStates[key]);
+                }
             }
         }
 
@@ -150,7 +154,8 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
                 collectionEnumerators,
                 scheduleItem,
                 playoutItems,
-                peekItemStart);
+                peekItemStart,
+                cancellationToken);
         }
 
         if (scheduleItem.FallbackFiller != null)
@@ -160,7 +165,8 @@ public class PlayoutModeSchedulerFlood : PlayoutModeSchedulerBase<ProgramSchedul
                 collectionEnumerators,
                 scheduleItem,
                 playoutItems,
-                peekItemStart);
+                peekItemStart,
+                cancellationToken);
         }
 
         nextState = nextState with { NextGuideGroup = nextState.IncrementGuideGroup };

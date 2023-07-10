@@ -8,8 +8,8 @@ namespace ErsatzTV.Infrastructure.Scheduling;
 public class MultiEpisodeShuffleCollectionEnumeratorFactory
     : IMultiEpisodeShuffleCollectionEnumeratorFactory
 {
-    private readonly IScriptEngine _scriptEngine;
     private readonly ILogger<MultiEpisodeShuffleCollectionEnumeratorFactory> _logger;
+    private readonly IScriptEngine _scriptEngine;
 
     public MultiEpisodeShuffleCollectionEnumeratorFactory(
         IScriptEngine scriptEngine,
@@ -22,6 +22,13 @@ public class MultiEpisodeShuffleCollectionEnumeratorFactory
     public IMediaCollectionEnumerator Create(
         string jsScriptPath,
         IList<MediaItem> mediaItems,
-        CollectionEnumeratorState state) =>
-        new MultiEpisodeShuffleCollectionEnumerator(mediaItems, state, _scriptEngine, jsScriptPath, _logger);
+        CollectionEnumeratorState state,
+        CancellationToken cancellationToken) =>
+        new MultiEpisodeShuffleCollectionEnumerator(
+            mediaItems,
+            state,
+            _scriptEngine,
+            jsScriptPath,
+            _logger,
+            cancellationToken);
 }

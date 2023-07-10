@@ -1,23 +1,28 @@
 ﻿using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Scheduling;
 
 namespace ErsatzTV.Core.Scheduling;
 
 public class ShuffleInOrderCollectionEnumerator : IMediaCollectionEnumerator
 {
+    private readonly CancellationToken _cancellationToken;
     private readonly IList<CollectionWithItems> _collections;
     private readonly int _mediaItemCount;
     private readonly bool _randomStartPoint;
     private Random _random;
     private IList<MediaItem> _shuffled;
+    private readonly Lazy<Option<TimeSpan>> _lazyMinimumDuration;
 
     public ShuffleInOrderCollectionEnumerator(
         IList<CollectionWithItems> collections,
         CollectionEnumeratorState state,
-        bool randomStartPoint)
+        bool randomStartPoint,
+        CancellationToken cancellationToken)
     {
         _collections = collections;
         _randomStartPoint = randomStartPoint;
+        _cancellationToken = cancellationToken;
         _mediaItemCount = collections.Sum(c => c.MediaItems.Count);
 
         if (state.Index >= _mediaItemCount)
@@ -28,12 +33,26 @@ public class ShuffleInOrderCollectionEnumerator : IMediaCollectionEnumerator
 
         _random = new Random(state.Seed);
         _shuffled = Shuffle(_collections, _random);
+        _lazyMinimumDuration =
+            new Lazy<Option<TimeSpan>>(() => _shuffled.Bind(i => i.GetDuration()).OrderBy(identity).HeadOrNone());
 
         State = new CollectionEnumeratorState { Seed = state.Seed };
         while (State.Index < state.Index)
         {
             MoveNext();
         }
+    }
+
+    public void ResetState(CollectionEnumeratorState state)
+    {
+        // only re-shuffle if needed
+        if (State.Seed != state.Seed)
+        {
+            _random = new Random(state.Seed);
+            _shuffled = Shuffle(_collections, _random);
+        }
+
+        State.Index = state.Index;
     }
 
     public CollectionEnumeratorState State { get; }
@@ -52,7 +71,8 @@ public class ShuffleInOrderCollectionEnumerator : IMediaCollectionEnumerator
                 State.Seed = _random.Next();
                 _random = new Random(State.Seed);
                 _shuffled = Shuffle(_collections, _random);
-            } while (_collections.Count > 1 && Current.Map(x => x.Id) == tail.Map(x => x.Id));
+            } while (!_cancellationToken.IsCancellationRequested && _collections.Count > 1 &&
+                     Current.Map(x => x.Id) == tail.Map(x => x.Id));
         }
         else
         {
@@ -61,8 +81,6 @@ public class ShuffleInOrderCollectionEnumerator : IMediaCollectionEnumerator
 
         State.Index %= _shuffled.Count;
     }
-
-    public Option<MediaItem> Peek(int offset) => throw new NotSupportedException();
 
     private IList<MediaItem> Shuffle(IList<CollectionWithItems> collections, Random random)
     {
@@ -199,4 +217,8 @@ public class ShuffleInOrderCollectionEnumerator : IMediaCollectionEnumerator
         public int Index { get; set; }
         public IList<Option<MediaItem>> Items { get; set; }
     }
+
+    public Option<TimeSpan> MinimumDuration => _lazyMinimumDuration.Value;
+
+    public int Count => _shuffled.Count;
 }

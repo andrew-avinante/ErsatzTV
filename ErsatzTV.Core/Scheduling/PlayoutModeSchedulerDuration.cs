@@ -17,7 +17,8 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
         Dictionary<CollectionKey, IMediaCollectionEnumerator> collectionEnumerators,
         ProgramScheduleItemDuration scheduleItem,
         ProgramScheduleItem nextScheduleItem,
-        DateTimeOffset hardStop)
+        DateTimeOffset hardStop,
+        CancellationToken cancellationToken)
     {
         var playoutItems = new List<PlayoutItem>();
 
@@ -25,6 +26,7 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
 
         var willFinishInTime = true;
         Option<DateTimeOffset> durationUntil = None;
+        int discardAttempts = 0;
 
         IMediaCollectionEnumerator contentEnumerator =
             collectionEnumerators[CollectionKey.ForScheduleItem(scheduleItem)];
@@ -58,7 +60,7 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
             if (itemDuration > scheduleItem.PlayoutDuration)
             {
                 _logger.LogWarning(
-                    "Skipping playout item {Title} with duration {Duration} that is longer than schedule item duration {PlayoutDuration}",
+                    "Skipping playout item {Title} with duration {Duration:hh\\:mm\\:ss} that will never fit in schedule item duration {PlayoutDuration:hh\\:mm\\:ss}",
                     PlayoutBuilder.DisplayTitle(mediaItem),
                     itemDuration,
                     scheduleItem.PlayoutDuration);
@@ -67,71 +69,119 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
                 continue;
             }
 
-            var playoutItem = new PlayoutItem
+            TimeSpan remainingDuration = durationUntil.ValueUnsafe() - itemStartTime;
+            if (scheduleItem.DiscardToFillAttempts > 0 &&
+                remainingDuration >= contentEnumerator.MinimumDuration.IfNone(TimeSpan.Zero) &&
+                itemDuration > remainingDuration)
             {
-                MediaItemId = mediaItem.Id,
-                Start = itemStartTime.UtcDateTime,
-                Finish = itemStartTime.UtcDateTime + itemDuration,
-                InPoint = TimeSpan.Zero,
-                OutPoint = itemDuration,
-                GuideGroup = nextState.NextGuideGroup,
-                FillerKind = scheduleItem.GuideMode == GuideMode.Filler
-                    ? FillerKind.GuideMode
-                    : FillerKind.None,
-                CustomTitle = scheduleItem.CustomTitle,
-                WatermarkId = scheduleItem.WatermarkId,
-                PreferredAudioLanguageCode = scheduleItem.PreferredAudioLanguageCode,
-                PreferredAudioTitle = scheduleItem.PreferredAudioTitle,
-                PreferredSubtitleLanguageCode = scheduleItem.PreferredSubtitleLanguageCode,
-                SubtitleMode = scheduleItem.SubtitleMode
-            };
-
-            durationUntil.Do(du => playoutItem.GuideFinish = du.UtcDateTime);
-
-            DateTimeOffset durationFinish = nextState.DurationFinish.IfNone(SystemTime.MaxValueUtc);
-            DateTimeOffset itemEndTimeWithFiller = CalculateEndTimeWithFiller(
-                collectionEnumerators,
-                scheduleItem,
-                itemStartTime,
-                itemDuration,
-                itemChapters);
-            willFinishInTime = itemStartTime > durationFinish ||
-                               itemEndTimeWithFiller <= durationFinish;
-            if (willFinishInTime)
-            {
-                // LogScheduledItem(scheduleItem, mediaItem, itemStartTime);
-                playoutItems.AddRange(
-                    AddFiller(nextState, collectionEnumerators, scheduleItem, playoutItem, itemChapters));
-
-                nextState = nextState with
+                discardAttempts++;
+                if (discardAttempts > scheduleItem.DiscardToFillAttempts)
                 {
-                    CurrentTime = itemEndTimeWithFiller,
+                    nextState = nextState with
+                    {
+                        DurationFinish = None
+                    };
 
-                    // only bump guide group if we don't have a custom title
-                    NextGuideGroup = string.IsNullOrWhiteSpace(scheduleItem.CustomTitle)
-                        ? nextState.IncrementGuideGroup
-                        : nextState.NextGuideGroup
-                };
+                    nextState.ScheduleItemsEnumerator.MoveNext();
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "Skipping playout item {Title} with duration {Duration:hh\\:mm\\:ss} that is longer than remaining duration {RemainingDuration:hh\\:mm\\:ss}",
+                        PlayoutBuilder.DisplayTitle(mediaItem),
+                        itemDuration,
+                        remainingDuration);
 
-                contentEnumerator.MoveNext();
+                    contentEnumerator.MoveNext();
+                }
             }
             else
             {
-                TimeSpan durationBlock = itemEndTimeWithFiller - itemStartTime;
-                if (itemEndTimeWithFiller - itemStartTime > scheduleItem.PlayoutDuration)
-                {
-                    _logger.LogWarning(
-                        "Unable to schedule duration block of {DurationBlock} which is longer than the configured playout duration {PlayoutDuration}",
-                        durationBlock,
-                        scheduleItem.PlayoutDuration);
-                }
+                discardAttempts = 0;
 
-                nextState = nextState with
+                var playoutItem = new PlayoutItem
                 {
-                    DurationFinish = None
+                    MediaItemId = mediaItem.Id,
+                    Start = itemStartTime.UtcDateTime,
+                    Finish = itemStartTime.UtcDateTime + itemDuration,
+                    InPoint = TimeSpan.Zero,
+                    OutPoint = itemDuration,
+                    GuideGroup = nextState.NextGuideGroup,
+                    FillerKind = scheduleItem.GuideMode == GuideMode.Filler
+                        ? FillerKind.GuideMode
+                        : FillerKind.None,
+                    CustomTitle = scheduleItem.CustomTitle,
+                    WatermarkId = scheduleItem.WatermarkId,
+                    PreferredAudioLanguageCode = scheduleItem.PreferredAudioLanguageCode,
+                    PreferredAudioTitle = scheduleItem.PreferredAudioTitle,
+                    PreferredSubtitleLanguageCode = scheduleItem.PreferredSubtitleLanguageCode,
+                    SubtitleMode = scheduleItem.SubtitleMode
                 };
 
-                nextState.ScheduleItemsEnumerator.MoveNext();
+                durationUntil.Do(du => playoutItem.GuideFinish = du.UtcDateTime);
+
+                DateTimeOffset durationFinish = nextState.DurationFinish.IfNone(SystemTime.MaxValueUtc);
+                
+                var enumeratorStates = new Dictionary<CollectionKey, CollectionEnumeratorState>();
+                foreach ((CollectionKey key, IMediaCollectionEnumerator enumerator) in collectionEnumerators)
+                {
+                    enumeratorStates.Add(key, enumerator.State.Clone());
+                }
+
+                List<PlayoutItem> maybePlayoutItems = AddFiller(
+                    nextState,
+                    collectionEnumerators,
+                    scheduleItem,
+                    playoutItem,
+                    itemChapters,
+                    log: false,
+                    cancellationToken);
+                
+                DateTimeOffset itemEndTimeWithFiller = maybePlayoutItems.Max(pi => pi.FinishOffset);
+
+                willFinishInTime = itemStartTime > durationFinish ||
+                                   itemEndTimeWithFiller <= durationFinish;
+                if (willFinishInTime)
+                {
+                    // LogScheduledItem(scheduleItem, mediaItem, itemStartTime);
+                    playoutItems.AddRange(maybePlayoutItems);
+
+                    nextState = nextState with
+                    {
+                        CurrentTime = itemEndTimeWithFiller,
+
+                        // only bump guide group if we don't have a custom title
+                        NextGuideGroup = string.IsNullOrWhiteSpace(scheduleItem.CustomTitle)
+                            ? nextState.IncrementGuideGroup
+                            : nextState.NextGuideGroup
+                    };
+
+                    contentEnumerator.MoveNext();
+                }
+                else
+                {
+                    // reset enumerators
+                    foreach ((CollectionKey key, IMediaCollectionEnumerator enumerator) in collectionEnumerators)
+                    {
+                        enumerator.ResetState(enumeratorStates[key]);
+                    }
+                    
+                    TimeSpan durationBlock = itemEndTimeWithFiller - itemStartTime;
+                    if (itemEndTimeWithFiller - itemStartTime > scheduleItem.PlayoutDuration)
+                    {
+                        _logger.LogWarning(
+                            "Unable to schedule duration block of {DurationBlock:hh\\:mm\\:ss} which is longer than the configured playout duration {PlayoutDuration:hh\\:mm\\:ss}",
+                            durationBlock,
+                            scheduleItem.PlayoutDuration);
+                    }
+
+                    nextState = nextState with
+                    {
+                        DurationFinish = None
+                    };
+
+                    nextState.ScheduleItemsEnumerator.MoveNext();
+                }
             }
         }
 
@@ -163,7 +213,8 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
                             collectionEnumerators,
                             scheduleItem,
                             playoutItems,
-                            nextItemStart);
+                            nextItemStart,
+                            cancellationToken);
                     }
 
                     if (scheduleItem.FallbackFiller != null)
@@ -173,7 +224,8 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
                             collectionEnumerators,
                             scheduleItem,
                             playoutItems,
-                            nextItemStart);
+                            nextItemStart,
+                            cancellationToken);
                     }
 
                     nextState = nextState with { CurrentTime = nextItemStart };
@@ -186,7 +238,8 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
                             collectionEnumerators,
                             scheduleItem,
                             playoutItems,
-                            nextItemStart);
+                            nextItemStart,
+                            cancellationToken);
                     }
 
                     nextState = nextState with { CurrentTime = nextItemStart };
@@ -195,7 +248,7 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
         }
 
         bool hasFallback = playoutItems.Any(p => p.FillerKind == FillerKind.Fallback);
-        
+
         var playoutItemsToClear = playoutItems
             .Filter(pi => pi.FillerKind == FillerKind.None)
             .ToList();
@@ -207,7 +260,7 @@ public class PlayoutModeSchedulerDuration : PlayoutModeSchedulerBase<ProgramSche
         {
             playoutItemsToClear.Remove(lastItem);
         }
-        
+
         foreach (PlayoutItem item in playoutItemsToClear)
         {
             item.GuideFinish = null;
